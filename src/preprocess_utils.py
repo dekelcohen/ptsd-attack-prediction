@@ -67,7 +67,8 @@ class PreprocessUtils:
      #%% get indexes (0 based) of tags in signal, based on merge by timestamps between 2 dfs
      def get_event_indices_in_sig(self,df_sig,df_tags):
           df_sig_tags = self.merge_2_timeseries(df_sig,df_tags)
-          return df_sig_tags
+          tags_indices = list(df_sig_tags[~df_sig_tags.tag.isna()].index)
+          return tags_indices
      
      
      #%% Read raw data and merge it by time to a single df
