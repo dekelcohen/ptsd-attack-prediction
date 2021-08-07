@@ -1,5 +1,7 @@
-
+import numpy as np
 import pandas as pd
+import os
+
 from numpy import mean
 from numpy import std
 from numpy import dstack
@@ -11,11 +13,21 @@ from tensorflow.keras.layers import Dropout
 from tensorflow.keras.layers import LSTM
 from tensorflow.keras.utils import to_categorical
 from matplotlib import pyplot
+from config import get_config
+from preprocess_utils import load_merge_timeseries_data
 
-def merge_2_timeseries(df_l,df_r):
-     pd.merge_asof(a, b, direction='nearest')
+DATA_FOLDER = '../data'
+cfg = get_config(data_folder=DATA_FOLDER)
+
+
+
+
+
+df_tm = load_merge_timeseries_data(acc_p_path = cfg.POLAR_ACC_PATH,ecg_p_path = cfg.POLAR_ECG_PATH, cfg=cfg)
+     
 # load a single file as a numpy array
 def load_file(filepath):
+     
 	dataframe = pd.read_csv(filepath, header=None, delim_whitespace=True)
 	return dataframe.values
 

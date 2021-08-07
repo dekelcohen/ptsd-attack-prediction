@@ -5,12 +5,20 @@ Created on Mon Jun 21 00:32:49 2021
 @author: Dekel
 """
 
+## Change Working Directory: D:\Dekel\Data\PTSD\ptsd-attack-prediction\src
 #%% imports
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import neurokit2 as nk
 import os
+from config import get_config
+from preprocess_utils import PreprocessUtils
+
+
+DATA_FOLDER = '../../data-large/first session'
+cfg = get_config(data_folder=DATA_FOLDER)
+cfg.TAGS_PATH = os.path.join(cfg.DATA_FOLDER, 'first session tagging.csv')
 
 #%% Samples
 # See sample code at: https://github.com/neuropsychology/NeuroKit/blob/dev/docs/examples/intervalrelated.ipynb
@@ -20,14 +28,23 @@ import os
 # Calc Polar  ecg sampling rate in Hz: 1e+9 / df_sig['sensor timestamp [ns]'].diff()
 POLAR_H10_ECG_SAMPLING_RATE_HZ = 130
 
-dirname = os.path.dirname(__file__)
 
 #%% Config
 plt.rcParams['figure.figsize'] = [15, 9]  # Bigger images
 plt.rcParams['font.size']= 13
 
+preut = PreprocessUtils(cfg=cfg)
+
+#%% Read GT (tags/labels) and cleanit
+df_tags = preut.read_preprocess_labels(path=cfg.TAGS_PATH)
+
 #%% Read data
-df_sig = pd.read_csv('../data/polar/Polar_H10_55354125_20210516_080846_ECG.txt',sep=';')
+# Read a single file type (ex: ECG) from all session subfolders 
+
+
+# TODO: df_ftrs = gen_feature_windows_for_type('ECG',df_tags, window_start=0,window_end=3*60,cfg)
+
+df_sig = preut.read_polar_sensor_files(sensor_type='ECG',polar_session_root_path=cfg.DATA_FOLDER)
 
 #%% Exract signal
 ecg_signals, info = nk.ecg_process(df_sig['ecg [uV]'], sampling_rate=POLAR_H10_ECG_SAMPLING_RATE_HZ)
@@ -40,3 +57,8 @@ epochs = nk.epochs_create(ecg_signals, events=[0, 15000], sampling_rate=100, epo
 
 #%% Extract ECG window features 
 df_fts = nk.ecg_intervalrelated(ecg_signals)
+
+
+
+####################### Tests#######################################3
+# Test: df_sig = read_polar_sensor_files('ECG',polar_session_root_path=cfg.DATA_FOLDER,cfg=cfg)
