@@ -9,30 +9,37 @@ import glob
 import pandas as pd
 
 class PreprocessUtils:
-#%% Set config from caller to be used in this module - no need to pass cfg to every func call
+      
      def __init__(self,cfg):
+          """
+          Parameters
+          ----------
+          cfg : Config
+               Pass config from caller.
+          """
           self.cfg = cfg
           
           
      def merge_2_timeseries(self,df_l,df_r):
-          return pd.merge_asof(df_l, df_r, on=self.cfg.TIMESTAMP_COL, tolerance=pd.Timedelta('500ms'), direction='nearest')
+          return pd.merge_asof(df_l, df_r, on=self.cfg.TIMESTAMP_COL, tolerance=pd.Timedelta('60s'), direction='nearest')
      
 
      #%% Polar H10 files format preprocess utils 
      def preprocess_polar(self,df):
           # Convert local Phone datetime string --> UTC datetime64 
           ts =df['Phone timestamp'].astype('datetime64').dt.tz_localize('Israel').dt.tz_convert('UTC')     
+          # calculate the sampling rate of the signal, using most accurate timestamps
+          sampling_rate = int(1e+9 / df['sensor timestamp [ns]'].diff().quantile([.1,.25,.5,.75,.9,.95,.99]).mean())
           tm_cols = df.columns[df.columns.str.contains('timestamp')]
           df = df.drop(columns=tm_cols)
           df.insert(0,self.cfg.TIMESTAMP_COL, ts)
-          df.sort_values(by=[self.cfg.TIMESTAMP_COL],inplace=True)
-          return df
+          return df, sampling_rate
      
-     def read_polar_sensor_files(self,sensor_type,polar_session_root_path):
+     def read_polar_sensor_files(self,sig_type,polar_session_root_path):
           """
           Parameters
           ----------
-          sensor_type : string
+          sig_type : string
                ECG, ACC, RR  - the sensor type to read recursively from the polar session folders. case sensitive
                must match part of the polar file name 
           polar_session_root_path : string
@@ -45,11 +52,13 @@ class PreprocessUtils:
           df of signal with timestamp - cleaned, normalized column names and types, concatenated from all session subfolders
      
           """
-          dfiles = glob.glob(polar_session_root_path + f"/**/*{sensor_type}.txt", recursive = True)
+          dfiles = glob.glob(polar_session_root_path + f"/**/*{sig_type}.txt", recursive = True)
           dfs_sig = [pd.read_csv(file_path,sep=';') for file_path in dfiles]
-          dfs_sig = [self.preprocess_polar(df) for df in dfs_sig]
           df_sig = pd.concat(dfs_sig)
-          return df_sig
+          df_sig, sampling_rate = self.preprocess_polar(df_sig)
+          df_sig.sort_values(by=[self.cfg.TIMESTAMP_COL],inplace=True)
+          df_sig = df_sig.reset_index(drop=True)
+          return df_sig, sampling_rate
           
      
      #%% Read preprocess labels file 
@@ -66,10 +75,9 @@ class PreprocessUtils:
      
      #%% get indexes (0 based) of tags in signal, based on merge by timestamps between 2 dfs
      def get_event_indices_in_sig(self,df_sig,df_tags):
-          df_sig_tags = self.merge_2_timeseries(df_sig,df_tags)
-          tags_indices = list(df_sig_tags[~df_sig_tags.tag.isna()].index)
-          return tags_indices
-     
+          df_tags_sig = self.merge_2_timeseries(df_tags,df_sig.reset_index().rename(columns={'index' : 'sig_index'}))
+          tags_indices = df_tags_sig[~df_tags_sig['sig_index'].isna()]
+          return tags_indices[[self.cfg.TIMESTAMP_COL,'tag','sig_index']].reset_index(drop=True)
      
      #%% Read raw data and merge it by time to a single df
      
@@ -86,25 +94,5 @@ class PreprocessUtils:
                df_res = self.merge_2_timeseries(df_res, df_ecg_p)
           return df_res
      
-     def gen_feature_windows_for_type(self,sensor_type,df_tags, window_start,window_end):
-          """
-          Parameters
-          ----------
-          sensor_type : string
-               ECG, ACC, RR  - the sensor type to generate features for
-          df_tags: df
-               dataframe of labels with timestamps, to merge_asof with the sesnor timestamps
-          window_start,window_end: int (seconds)
-               start and end of a time window around a label in seconds - used to compute features for the time window
-               ex: window_start=-8 --> time window starts 8 seconds before the label 
-               window_end=7 --> time window starts 7 seconds after the label 
-          Returns
-          -------
-          df of features of a sensor type for all labeled windows
-     
-          """
-          df_sig = self.read_polar_sensor_files(sensor_type.upper(),polar_session_root_path=self.cfg.DATA_FOLDER)
-          df_sig_tags = self.get_event_indices_in_sig(df_sig,df_tags)     
-
      
           
