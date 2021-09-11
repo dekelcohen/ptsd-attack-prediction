@@ -16,7 +16,7 @@ from config import get_config
 from preprocess_utils import PreprocessUtils
 from features_utils import FeaturesUtils
 
-DATA_FOLDER = '../../data-large/first session' # '../../data-large/empatica' # 
+DATA_FOLDER = '../../data-large/empatica' # '../../data-large/first session' # 
 cfg = get_config(data_folder=DATA_FOLDER)
 cfg.TAGS_PATH = os.path.join(cfg.DATA_FOLDER, 'tags.csv')
 
@@ -39,15 +39,20 @@ featut = FeaturesUtils(cfg=cfg)
 
 # %% Read GT (tags/labels) and cleanit
 df_tags = preut.read_preprocess_labels(path=cfg.TAGS_PATH)
-
-
+df_tags =df_tags[df_tags.userName == 'yoram1'] # Filter for Yoram events only
+df_tags.tag.value_counts()
 # %% Extract features
+windows_fts,features_cols = featut.gen_feature_windows_for_type(
+    preut=preut, sig_type='BVP', fmt='empatica_csv',df_tags=df_tags, window_start=0, window_end=5*60)
+
+
 windows_fts,features_cols = featut.gen_feature_windows_for_type(
     preut=preut, sig_type='ECG', fmt='polar_csv',df_tags=df_tags, window_start=0, window_end=5*60)
 
 
 # %% Test
-# df_sig, sampling_rate = preut.read_sensor_files(sig_type='',fmt='empatica_csv',root_path) 
+
+# df_sig, sampling_rate = preut.read_sensor_files(sig_type='BVP',fmt='empatica_csv',root_path=cfg.DATA_FOLDER) 
 
 # Old
 ################################### Draft Test ###########################################

@@ -21,8 +21,8 @@ class PreprocessUtils:
           """
           # preprocessing variants for polar, empatica and other sensor file formats 
           self.file_formats = {
-               'polar_csv' : { 'header' : 'infer','sep' : ';', 'preprocess_mtd' :  self.preprocess_polar },
-               'empatica_csv' : { 'header' : None, 'sep' : '', 'preprocess_mtd' :  self.preprocess_empatica }
+               'polar_csv' : { 'header' : 'infer','sep' : ';', 'sig_type_globexpr': '/**/*{sig_type}.txt' , 'preprocess_mtd' :  self.preprocess_polar },
+               'empatica_csv' : { 'header' : None, 'sep' : ' ', 'sig_type_globexpr': '/**/*{sig_type}.csv' , 'preprocess_mtd' :  self.preprocess_empatica }
                }
 
           self.cfg = cfg
@@ -50,7 +50,7 @@ class PreprocessUtils:
           sampling_rate = df.iloc[1][0]
           df = df.iloc[2:]
           ts = pd.date_range(start=start_dt_utc,periods=len(df),freq=f'{1000/sampling_rate}ms')
-          df.insert(0,self.cfg.TIMESTAMP_COL, ts)
+          df.insert(0,self.cfg.TIMESTAMP_COL, ts.tz_localize('UTC'))
           return df, sampling_rate
           
      def read_sensor_files(self,sig_type,fmt,root_path):
@@ -73,8 +73,9 @@ class PreprocessUtils:
           fmt_cfg = self.file_formats[fmt]
           header = fmt_cfg['header']
           sep = fmt_cfg['sep']
+          sig_type_globexpr = fmt_cfg['sig_type_globexpr'].format(sig_type = sig_type)
           preprocess_mtd = fmt_cfg['preprocess_mtd']
-          dfiles = glob.glob(root_path + f"/**/*{sig_type}.txt", recursive = True)
+          dfiles = glob.glob(root_path + sig_type_globexpr, recursive = True)
           dfs_sig = [pd.read_csv(file_path,header=header,sep=sep) for file_path in dfiles]
           df_sig = pd.concat(dfs_sig)
           df_sig, sampling_rate = preprocess_mtd(df_sig)
@@ -90,8 +91,10 @@ class PreprocessUtils:
           """
           df_tags_raw = pd.read_csv(path,sep=',')
           df_tags = pd.DataFrame()
-          df_tags[self.cfg.TIMESTAMP_COL] = df_tags_raw['updatedAt (S)'].astype('datetime64').dt.tz_localize('UTC')
-          df_tags['tag'] = df_tags_raw['name (S)']
+          df_tags[self.cfg.TIMESTAMP_COL] = df_tags_raw['startLocalTime'].astype('datetime64').dt.tz_localize('UTC')
+          df_tags['endUtcTime'] = df_tags_raw['endLocalTime'].astype('datetime64').dt.tz_localize('UTC')
+          df_tags['tag'] = df_tags_raw['name']
+          df_tags['userName'] = df_tags_raw['userName']
           df_tags.sort_values(by=[self.cfg.TIMESTAMP_COL],inplace=True)
           return df_tags
      
