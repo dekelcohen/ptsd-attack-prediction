@@ -16,9 +16,10 @@ from config import get_config
 from preprocess_utils import PreprocessUtils
 from features_utils import FeaturesUtils
 
-DATA_FOLDER = '../../data-large/first session'
+DATA_FOLDER = '../../data-large/first session' # '../../data-large/empatica' # 
 cfg = get_config(data_folder=DATA_FOLDER)
-cfg.TAGS_PATH = os.path.join(cfg.DATA_FOLDER, 'first session tagging.csv')
+cfg.TAGS_PATH = os.path.join(cfg.DATA_FOLDER, 'tags.csv')
+
 
 # %% Samples
 # See sample code at: https://github.com/neuropsychology/NeuroKit/blob/dev/docs/examples/intervalrelated.ipynb
@@ -39,14 +40,16 @@ featut = FeaturesUtils(cfg=cfg)
 # %% Read GT (tags/labels) and cleanit
 df_tags = preut.read_preprocess_labels(path=cfg.TAGS_PATH)
 
-# %% Read data
-# Read a single file type (ex: ECG) from all session subfolders
 
 # %% Extract features
-windows_fts = featut.gen_feature_windows_for_type(
-    preut=preut, sig_type='ECG', df_tags=df_tags, window_start=0, window_end=5*60)
+windows_fts,features_cols = featut.gen_feature_windows_for_type(
+    preut=preut, sig_type='ECG', fmt='polar_csv',df_tags=df_tags, window_start=0, window_end=5*60)
 
 
+# %% Test
+# df_sig, sampling_rate = preut.read_sensor_files(sig_type='',fmt='empatica_csv',root_path) 
+
+# Old
 ################################### Draft Test ###########################################
 # %% Exract signal
 ecg_signals, info = nk.ecg_process(
@@ -65,4 +68,4 @@ df_fts = nk.ecg_intervalrelated(ecg_signals)
 
 
 # Tests#######################################3
-# Test: df_sig = read_polar_sensor_files('ECG',polar_session_root_path=cfg.DATA_FOLDER,cfg=cfg)
+
