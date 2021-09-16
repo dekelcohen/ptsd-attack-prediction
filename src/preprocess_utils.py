@@ -6,10 +6,10 @@ Created on Wed Jul 28 00:48:13 2021
 """
 #%% imports
 import glob
-import pandas as pd
 from datetime import datetime 
-
-
+from itertools import chain
+from statistics import mean,stdev
+import pandas as pd
 class PreprocessUtils:
       
      def __init__(self,cfg):
@@ -47,7 +47,7 @@ class PreprocessUtils:
           df = df.rename(columns={0 : 'signal'})
           start_unix_timestamp = df.iloc[0][0]
           start_dt_utc = datetime.utcfromtimestamp(start_unix_timestamp)
-          sampling_rate = df.iloc[1][0]
+          sampling_rate = int(df.iloc[1][0])
           df = df.iloc[2:]
           ts = pd.date_range(start=start_dt_utc,periods=len(df),freq=f'{1000/sampling_rate}ms')
           df.insert(0,self.cfg.TIMESTAMP_COL, ts.tz_localize('UTC'))
@@ -76,9 +76,15 @@ class PreprocessUtils:
           sig_type_globexpr = fmt_cfg['sig_type_globexpr'].format(sig_type = sig_type)
           preprocess_mtd = fmt_cfg['preprocess_mtd']
           dfiles = glob.glob(root_path + sig_type_globexpr, recursive = True)
-          dfs_sig = [pd.read_csv(file_path,header=header,sep=sep) for file_path in dfiles]
+          lst_tup = [preprocess_mtd(pd.read_csv(file_path,header=header,sep=sep)) for file_path in dfiles]
+          sigs_samplings = list(zip(*lst_tup))
+          dfs_sig = sigs_samplings[0]
+          sampling_rate = mean(sigs_samplings[1])
+          if stdev(sigs_samplings[1]) > 0:
+               raise Exception(f'Error: sampling rate is different in {sig_type} files: {sigs_samplings[1]}')
+          #df_sig, sampling_rate = preprocess_mtd(df_sig)
           df_sig = pd.concat(dfs_sig)
-          df_sig, sampling_rate = preprocess_mtd(df_sig)
+          
           df_sig.sort_values(by=[self.cfg.TIMESTAMP_COL],inplace=True)
           df_sig = df_sig.reset_index(drop=True)
           return df_sig, sampling_rate
@@ -104,6 +110,19 @@ class PreprocessUtils:
           tags_indices = df_tags_sig[~df_tags_sig['sig_index'].isna()]
           return tags_indices[[self.cfg.TIMESTAMP_COL,'tag','sig_index']].reset_index(drop=True)
      
+     #%% Create windows before/after tags  
+     def add_windows_indices(tags_sig_index,df_sig, n_windows, sampling_rate, window_len):
+          wnd_len_ind = window_len * sampling_rate
+          def create_before_after_indxs(ind):
+               before_idxs = range(ind,max(df_sig.index.min(), ind - n_windows*wnd_len_ind), -wnd_len_ind)
+               after_idxs = range(ind,min(df_sig.index.max(), ind + n_windows*wnd_len_ind), wnd_len_ind)        
+               return chain(before_idxs,after_idxs) 
+               
+          tags_sig_index = tags_sig_index.astype('int64')
+          series_arrays = tags_sig_index.apply(create_before_after_indxs)
+          added_indices = list(chain.from_iterable(series_arrays))
+          return added_indices
+          
      #%% Read raw data and merge it by time to a single df
      
      def load_merge_timeseries_data(self,acc_p_path,ecg_p_path):

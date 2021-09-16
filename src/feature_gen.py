@@ -39,9 +39,10 @@ featut = FeaturesUtils(cfg=cfg)
 
 # %% Read GT (tags/labels) and cleanit
 df_tags = preut.read_preprocess_labels(path=cfg.TAGS_PATH)
-df_tags =df_tags[df_tags.userName == 'yoram1'] # Filter for Yoram events only
-df_tags.tag.value_counts()
+df_tags = df_tags[df_tags.userName == 'yoram1'] # Filter for Yoram events only
+print(df_tags.tag.value_counts())
 # %% Extract features
+df_tags = df_tags[(df_tags.tag == 'interventionNedded') | (df_tags.tag == 'moderateEvent')]
 windows_fts,features_cols = featut.gen_feature_windows_for_type(
     preut=preut, sig_type='BVP', fmt='empatica_csv',df_tags=df_tags, window_start=0, window_end=5*60)
 
@@ -51,6 +52,7 @@ windows_fts,features_cols = featut.gen_feature_windows_for_type(
 
 
 # %% Test
+df_sig[(df_sig.timestamp > '2021-08-16 13:00:00') & (df_sig.timestamp < '2021-08-16 14:40:00')]
 
 # df_sig, sampling_rate = preut.read_sensor_files(sig_type='BVP',fmt='empatica_csv',root_path=cfg.DATA_FOLDER) 
 
