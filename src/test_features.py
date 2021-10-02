@@ -44,9 +44,19 @@ print(df_tags.tag.value_counts())
 # %% Extract features
 df_tags = df_tags[(df_tags.tag == 'interventionNedded') | (df_tags.tag == 'moderateEvent')]
 windows_fts,features_cols = featut.gen_feature_windows_for_type(
-    preut=preut, sig_type='BVP', fmt='empatica_csv',df_tags=df_tags, window_start=0, window_end=5*60)
+    preut=preut, sig_type='BVP', fmt='empatica_csv',df_tags=df_tags, window_start=0, window_end=3*60,
+    add_n_windows_ba = 10)
 
 
+# Read EDA 
+df_eda, sampling_rate = preut.read_sensor_files(sig_type='EDA',fmt='empatica_csv',root_path=cfg.DATA_FOLDER)
+df_tags_eda = preut.merge_2_timeseries(df_tags,df_eda)
+df_eda_s = df_tags_eda[[cfg.TIMESTAMP_COL,'tag','signal']]
+
+
+df_eda.describe(include='all')
+
+########### ECG Polar test
 windows_fts,features_cols = featut.gen_feature_windows_for_type(
     preut=preut, sig_type='ECG', fmt='polar_csv',df_tags=df_tags, window_start=0, window_end=5*60)
 

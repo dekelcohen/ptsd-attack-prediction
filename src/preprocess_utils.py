@@ -111,17 +111,21 @@ class PreprocessUtils:
           return tags_indices[[self.cfg.TIMESTAMP_COL,'tag','sig_index']].reset_index(drop=True)
      
      #%% Create windows before/after tags  
-     def add_windows_indices(tags_sig_index,df_sig, n_windows, sampling_rate, window_len):
+     def add_windows_indices(self,tags_indices,df_sig, n_windows, sampling_rate, window_len):
           wnd_len_ind = window_len * sampling_rate
-          def create_before_after_indxs(ind):
-               before_idxs = range(ind,max(df_sig.index.min(), ind - n_windows*wnd_len_ind), -wnd_len_ind)
-               after_idxs = range(ind,min(df_sig.index.max(), ind + n_windows*wnd_len_ind), wnd_len_ind)        
-               return chain(before_idxs,after_idxs) 
+          def create_before_after_indxs(tag_ind):
+               ind = tag_ind.sig_index
+               before_idxs = range(ind-wnd_len_ind,max(df_sig.index.min(), ind - (n_windows+1)*wnd_len_ind), -wnd_len_ind)
+               after_idxs = range(ind+wnd_len_ind,min(df_sig.index.max(), ind + (n_windows+1)*wnd_len_ind), wnd_len_ind)        
+               idxs = list(chain(before_idxs,after_idxs))
+               return pd.Series([tag_ind.tag,idxs],index=['tag','sig_index'] ) 
                
-          tags_sig_index = tags_sig_index.astype('int64')
-          series_arrays = tags_sig_index.apply(create_before_after_indxs)
-          added_indices = list(chain.from_iterable(series_arrays))
-          return added_indices
+          df_added_indices = tags_indices.apply(create_before_after_indxs,axis=1)
+          df_added_indices = df_added_indices.explode(column='sig_index')
+          df_added_indices = df_added_indices.reset_index(drop=True)
+          df_added_indices['tag'] = 'added_' + df_added_indices.tag
+          df_added_indices['timestamp'] = df_sig.loc[df_added_indices.sig_index].timestamp.tolist()
+          return df_added_indices
           
      #%% Read raw data and merge it by time to a single df
      

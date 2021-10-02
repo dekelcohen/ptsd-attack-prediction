@@ -55,7 +55,7 @@ class FeaturesUtils:
           df_epochs_fts = pd.concat(epochs_fts)
           return df_epochs_fts
      
-     def gen_feature_windows_for_type(self,preut,sig_type,fmt,df_tags, window_start,window_end,n_windows_ba = 0,root_path=None):
+     def gen_feature_windows_for_type(self,preut,sig_type,fmt,df_tags, window_start,window_end,add_n_windows_ba = 0,root_path=None):
           """
           Parameters
           ----------
@@ -67,7 +67,7 @@ class FeaturesUtils:
                start and end of a time window around a label in seconds - used to compute features for the time window
                ex: window_start=-8 --> time window starts 8 seconds before the label 
                window_end=7 --> time window starts 7 seconds after the label 
-          n_windows_ba - if not 0 - create <n_windows_ba> windows before and <n_windows_ba> after the tag
+          add_n_windows_ba - if not 0 - create <add_n_windows_ba> windows before and <n_windows_ba> after the tag
           Returns
           -------
           list of dfs of features of a sig type for all labeled windows
@@ -80,15 +80,19 @@ class FeaturesUtils:
           sig_type = sig_type.upper()
           df_sig, sampling_rate = preut.read_sensor_files(sig_type,fmt,root_path)
           tags_indices = preut.get_event_indices_in_sig(df_sig,df_tags)
-          added_indices = []
-          if n_windows_ba > 0:
-               added_indices = preut.add_windows_indices(tags_indices.sig_index, df_sig=df_sig, n_windows=n_windows_ba, sampling_rate=sampling_rate, window_len = window_end - window_start)
+          ftr_indices = tags_indices # tagged idxs + optional added windows before and after (add_n_windows_ba)
+          if add_n_windows_ba > 0:
+               added_indices = preut.add_windows_indices(tags_indices=ftr_indices, df_sig=df_sig, n_windows=add_n_windows_ba, sampling_rate=sampling_rate, window_len = window_end - window_start)
+               ftr_indices = pd.concat([ftr_indices,added_indices],axis=0)
+               ftr_indices.sort_values(by=[self.cfg.TIMESTAMP_COL],inplace=True)
+               ftr_indices = ftr_indices.reset_index(drop=True)
                 
-          epochs = nk.epochs_create(df_sig, events=tags_indices.sig_index.tolist() + added_indices, sampling_rate=sampling_rate, epochs_start=window_start, epochs_end=window_end)
+          evt_idxs = ftr_indices.sig_index.tolist() 
+          epochs = nk.epochs_create(df_sig, events=evt_idxs, sampling_rate=sampling_rate, epochs_start=window_start, epochs_end=window_end)
           get_feature_windows_mtd = self.per_sig_features[sig_type]
           df_epochs_fts = get_feature_windows_mtd(epochs,sampling_rate)   
           features_cols = df_epochs_fts.columns.tolist()
-          df_epochs_fts = pd.concat([df_epochs_fts.reset_index(drop=True),tags_indices],axis=1)
+          df_epochs_fts = pd.concat([df_epochs_fts.reset_index(drop=True),ftr_indices],axis=1)
           return df_epochs_fts, features_cols
      
           
