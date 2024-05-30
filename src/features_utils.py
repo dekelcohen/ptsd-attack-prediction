@@ -79,7 +79,12 @@ class FeaturesUtils:
                
           sig_type = sig_type.upper()
           df_sig, sampling_rate = preut.read_sensor_files(sig_type,fmt,root_path)
-          tags_indices = preut.get_event_indices_in_sig(df_sig,df_tags)
+          if not df_sig:
+               return None
+          if df_tags:
+               tags_indices = preut.get_event_indices_in_sig(df_sig,df_tags)
+          else:
+               tags_indices = []
           ftr_indices = tags_indices # tagged idxs + optional added windows before and after (add_n_windows_ba)
           if add_n_windows_ba > 0:
                added_indices = preut.add_windows_indices(tags_indices=ftr_indices, df_sig=df_sig, n_windows=add_n_windows_ba, sampling_rate=sampling_rate, window_len = window_end - window_start)

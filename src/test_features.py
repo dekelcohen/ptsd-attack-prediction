@@ -16,7 +16,7 @@ from config import get_config
 from preprocess_utils import PreprocessUtils
 from features_utils import FeaturesUtils
 
-DATA_FOLDER = '../../data-large/empatica' # '../../data-large/first session' # 
+DATA_FOLDER = "data/e4/y/1629135701_A0347C"#'../../data-large/empatica' # '../../data-large/first session' #
 cfg = get_config(data_folder=DATA_FOLDER)
 cfg.TAGS_PATH = os.path.join(cfg.DATA_FOLDER, 'tags.csv')
 
@@ -39,49 +39,57 @@ featut = FeaturesUtils(cfg=cfg)
 
 # %% Read GT (tags/labels) and cleanit
 df_tags = preut.read_preprocess_labels(path=cfg.TAGS_PATH)
-df_tags = df_tags[df_tags.userName == 'yoram1'] # Filter for Yoram events only
-print(df_tags.tag.value_counts())
-# %% Extract features
-df_tags = df_tags[(df_tags.tag == 'interventionNedded') | (df_tags.tag == 'moderateEvent')]
-windows_fts,features_cols = featut.gen_feature_windows_for_type(
-    preut=preut, sig_type='BVP', fmt='empatica_csv',df_tags=df_tags, window_start=0, window_end=3*60,
-    add_n_windows_ba = 10)
+if df_tags:
+    df_tags = df_tags[df_tags.userName == 'yoram1'] # Filter for Yoram events only
+    print(df_tags.tag.value_counts())
+    # %% Extract features
+    df_tags = df_tags[(df_tags.tag == 'interventionNedded') | (df_tags.tag == 'moderateEvent')]
+    windows_fts,features_cols = featut.gen_feature_windows_for_type(
+        preut=preut, sig_type='BVP', fmt='empatica_csv',df_tags=df_tags, window_start=0, window_end=3*60,
+        add_n_windows_ba = 10)
 
 
 # Read EDA 
 df_eda, sampling_rate = preut.read_sensor_files(sig_type='EDA',fmt='empatica_csv',root_path=cfg.DATA_FOLDER)
-df_tags_eda = preut.merge_2_timeseries(df_tags,df_eda)
-df_eda_s = df_tags_eda[[cfg.TIMESTAMP_COL,'tag','signal']]
+if df_tags:
+    df_tags_eda = preut.merge_2_timeseries(df_tags,df_eda)
+    df_eda_s = df_tags_eda[[cfg.TIMESTAMP_COL,'tag','signal']]
 
 
-df_eda.describe(include='all')
+from bokeh.plotting import figure, show
+from bokeh.models import DatetimeTickFormatter
+
+color = ['red', 'green', 'magenta', 'black']
+p = figure(sizing_mode="stretch_both")
+times = pd.to_datetime(df_eda.timestamp)
+p.line(times, df_eda['signal'], color='blue')
+p.xaxis.formatter=DatetimeTickFormatter(days="%m/%d",
+hours="%H",
+minutes="%H:%M")
+show(p)
 
 ########### ECG Polar test
-windows_fts,features_cols = featut.gen_feature_windows_for_type(
-    preut=preut, sig_type='ECG', fmt='polar_csv',df_tags=df_tags, window_start=0, window_end=5*60)
+# windows_fts,features_cols = featut.gen_feature_windows_for_type(
+#     preut=preut, sig_type='ECG', fmt='polar_csv',df_tags=df_tags, window_start=0, window_end=5*60)
 
 
 # %% Test
-df_sig[(df_sig.timestamp > '2021-08-16 13:00:00') & (df_sig.timestamp < '2021-08-16 14:40:00')]
+#df_sig[(df_sig.timestamp > '2021-08-16 13:00:00') & (df_sig.timestamp < '2021-08-16 14:40:00')]
 
 # df_sig, sampling_rate = preut.read_sensor_files(sig_type='BVP',fmt='empatica_csv',root_path=cfg.DATA_FOLDER) 
 
 # Old
 ################################### Draft Test ###########################################
 # %% Exract signal
-ecg_signals, info = nk.ecg_process(
-    df_sig['ecg [uV]'], sampling_rate=POLAR_H10_ECG_SAMPLING_RATE_HZ)
-plot = nk.ecg_plot(ecg_signals[:3000],
-                   sampling_rate=POLAR_H10_ECG_SAMPLING_RATE_HZ)
-
+#
 # %% Segment the signal to windows
 # This returns a dictionary of 2 processed ECG dataframes, which you can then enter into ecg_intervalrelated().
 # Half the data
-epochs = nk.epochs_create(ecg_signals, events=[
-                          0, 15000], sampling_rate=100, epochs_start=0, epochs_end=150)
+#epochs = nk.epochs_create(ecg_signals, events=[
+#                          0, 15000], sampling_rate=100, epochs_start=0, epochs_end=150)
 
 # %% Extract ECG window features
-df_fts = nk.ecg_intervalrelated(ecg_signals)
+#df_fts = nk.ecg_intervalrelated(ecg_signals)
 
 
 # Tests#######################################3
