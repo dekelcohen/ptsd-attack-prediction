@@ -55,7 +55,7 @@ class PreprocessUtils:
         df = df.rename(columns={0: 'signal'})
         start_unix_timestamp = df.iloc[0][0]
         start_dt_utc = datetime.utcfromtimestamp(start_unix_timestamp)
-        sampling_rate = int(df.iloc[1][0])
+        sampling_rate = round(df.iloc[1][0])
         df = df.iloc[2:]
         ts = pd.date_range(start=start_dt_utc, periods=len(df), freq=f'{1000 / sampling_rate}ms')
         df.insert(0, self.cfg.TIMESTAMP_COL, ts.tz_localize('UTC'))

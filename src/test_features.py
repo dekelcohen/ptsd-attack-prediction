@@ -16,7 +16,8 @@ from config import get_config
 from preprocess_utils import PreprocessUtils
 from features_utils import FeaturesUtils
 
-DATA_FOLDER = "data/e4/y/1629135701_A0347C"#'../../data-large/empatica' # '../../data-large/first session' #
+DATA_FOLDER = "data/embrace_plus/sample/1-1-0000000001_1705568933"#'../../data-large/empatica' # '../../data-large/first session' #
+# DATA_FOLDER = "data/e4/y/1629135701_A0347C"#'../../data-large/empatica' # '../../data-large/first session' #
 cfg = get_config(data_folder=DATA_FOLDER)
 cfg.TAGS_PATH = os.path.join(cfg.DATA_FOLDER, 'tags.csv')
 
@@ -43,7 +44,7 @@ if df_tags:
     df_tags = df_tags[df_tags.userName == 'yoram1'] # Filter for Yoram events only
     print(df_tags.tag.value_counts())
     # %% Extract features
-    df_tags = df_tags[(df_tags.tag == 'interventionNedded') | (df_tags.tag == 'moderateEvent')]
+    df_tags = df_tags[(df_tags.tag == 'interventionNeeded') | (df_tags.tag == 'moderateEvent')]
     windows_fts,features_cols = featut.gen_feature_windows_for_type(
         preut=preut, sig_type='BVP', fmt='empatica_csv',df_tags=df_tags, window_start=0, window_end=3*60,
         add_n_windows_ba = 10)
