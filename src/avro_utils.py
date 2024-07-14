@@ -111,5 +111,5 @@ def update_csvs_from_new_avros(avro_root_dir):
                     generate_csvs_from_avro(Path(os.path.join(avro_root_dir, user_dir, filename)))
 
 
-avro_root_dir = Path("data/embrace_plus")
+avro_root_dir = Path("data/embrace_plus/2024-05-28/0010-3YK3K15223/raw_data")
 update_csvs_from_new_avros(avro_root_dir)
