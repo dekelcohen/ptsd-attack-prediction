@@ -1,40 +1,101 @@
 import json
+import os
+from datetime import datetime
+from math import sqrt
 from pathlib import Path
 
 import pandas as pd
 from avro.datafile import DataFileReader
 from avro.io import DatumReader
+from matplotlib import pyplot
+from pandas import DataFrame
+from pandas.plotting import autocorrelation_plot
 
-eda_file_path = Path("data/embrace_plus/2024-05-28/0010-3YK3K15223/digital_biomarkers/aggregated_per_minute/1-1-0010_2024-05-28_eda.csv")
-pr_file_path = Path("data/embrace_plus/2024-05-28/0010-3YK3K15223/digital_biomarkers/aggregated_per_minute/1-1-0010_2024-05-28_pulse-rate.csv")
-eda_df = pd.read_csv(eda_file_path, header=0, sep=',')
-pr_df = pd.read_csv(pr_file_path, header=0, sep=',')
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_squared_error
 
-avro_file_path = Path("data/embrace_plus/2025-03-30/TRAIL003-3YK3K153QJ/raw_data/v6/1-1-TRAIL003_1743315693.avro")
+selected_participant_id = "POC1"
+participants_data_dir = Path("data/embrace_plus/participants_data")
+biomarkers_subpath = Path("digital_biomarkers/aggregated_per_minute")
+eda_file_suffix = "eda.csv"
+participant_eda_df = DataFrame()
+participant_dir = os.path.join(participants_data_dir, selected_participant_id)
+for date in os.listdir(participant_dir):
+	for device_dir in os.listdir(os.path.join(participant_dir,date)):
+		biomarkers_dir = os.path.join(participant_dir, date,device_dir, biomarkers_subpath)
+		for filename in os.listdir(biomarkers_dir):
+			if filename.endswith(eda_file_suffix):
+				eda_df = pd.read_csv(
+					os.path.join(biomarkers_dir, filename), header=0, sep=',')
+				if participant_eda_df.empty:
+					participant_eda_df = eda_df
+				else:
+					participant_eda_df = pd.concat([participant_eda_df, eda_df])
+clean_participant_eda_df = participant_eda_df.dropna(subset=['eda_scl_usiemens'])
+
+
+# eda_file_path = Path("data/embrace_plus/2024-05-28/0010-3YK3K15223/digital_biomarkers/aggregated_per_minute/1-1-0010_2024-05-28_eda.csv")
+# pr_file_path = Path("data/embrace_plus/2024-05-28/0010-3YK3K15223/digital_biomarkers/aggregated_per_minute/1-1-0010_2024-05-28_pulse-rate.csv")
+# eda_df = pd.read_csv(eda_file_path, header=0, sep=',')
+# pr_df = pd.read_csv(pr_file_path, header=0, sep=',')
+# clean_eda_df = eda_df.dropna(subset=['eda_scl_usiemens'])
+
+# autocorrelation_plot(clean_participant_eda_df['eda_scl_usiemens'])
+# pyplot.show()
+
+
+X = clean_participant_eda_df['eda_scl_usiemens'].values
+size = int(len(X) * 0.9)
+train, test = X[0:size], X[size:len(X)]
+history = [x for x in train]
+predictions = list()
+model = ARIMA(history, order=(400, 1, 0))
+model_fit = model.fit()
+output = model_fit.forecast(steps=len(test))
+
+# walk-forward validation
+for t in range(len(test)):
+	yhat = output[t]
+	predictions.append(yhat)
+	obs = test[t]
+	history.append(obs)
+	print('predicted=%f, expected=%f' % (yhat, obs))
+# evaluate forecasts
+rmse = sqrt(mean_squared_error(test, predictions))
+print('Test RMSE: %.3f' % rmse)
+# plot forecasts against actual outcomes
+pyplot.plot(test)
+pyplot.plot(predictions, color='red')
+pyplot.show()
+
+avro_file_path = Path("data/embrace_plus/2024-05-28/0010-3YK3K15223/raw_data/v6/1-1-0010_1716925835.avro")
 reader = DataFileReader(open(avro_file_path, "rb"), DatumReader())
 schema = json.loads(reader.meta.get('avro.schema').decode('utf-8'))
 data = next(reader)
 
-from bokeh.plotting import figure, show
-from bokeh.models import DatetimeTickFormatter, Range1d, LinearAxis
+# from bokeh.plotting import figure, show
+# from bokeh.models import DatetimeTickFormatter, Range1d, LinearAxis
 
-fig = figure(sizing_mode="stretch_both")
-fig.xaxis.axis_label = 'Time'
-fig.xaxis.formatter=DatetimeTickFormatter(days="%m/%d",
-hours="%H",
-minutes="%H:%M")
+# fig = figure(sizing_mode="stretch_both")
+# fig.xaxis.axis_label = 'Time'
+# fig.xaxis.formatter=DatetimeTickFormatter(days="%m/%d",
+# hours="%H",
+# minutes="%H:%M")
+
+def parser(x):
+	return datetime.strptime('190'+x, '%Y-%m')
 
 # Define 1st LHS y-axis
-fig.yaxis.axis_label = 'EDA [μS]'
-fig.y_range = Range1d(start=0, end=30)
+# fig.yaxis.axis_label = 'EDA [μS]'
+# fig.y_range = Range1d(start=0, end=30)
 
 # # Create 2nd LHS y-axis
 # fig.extra_y_ranges['temp'] = Range1d(start=0, end=50)
 # fig.add_layout(LinearAxis(y_range_name='temp', axis_label='Temperature [°C]'), 'left')
 
 # Create 1st RHS y-axis
-fig.extra_y_ranges['pr'] = Range1d(start=50, end=200)
-fig.add_layout(LinearAxis(y_range_name='pr', axis_label='PR [BPM]'), 'right')
+# fig.extra_y_ranges['pr'] = Range1d(start=50, end=200)
+# fig.add_layout(LinearAxis(y_range_name='pr', axis_label='PR [BPM]'), 'right')
 
 # # Create 2nd RHS y-axis
 # fig.extra_y_ranges['gflow'] = Range1d(start=0, end=50)
@@ -42,21 +103,21 @@ fig.add_layout(LinearAxis(y_range_name='pr', axis_label='PR [BPM]'), 'right')
 
 eda_times = pd.to_datetime(eda_df.timestamp_iso)
 
-fig.line(
-    x=eda_times,
-    y=eda_df.eda_scl_usiemens,
-    legend_label='EDA',
-    color='blue'
-)
-pr_times = pd.to_datetime(pr_df.timestamp_iso)
+# fig.line(
+#     x=eda_times,
+#     y=eda_df.eda_scl_usiemens,
+#     legend_label='EDA',
+#     color='blue'
+# )
+# pr_times = pd.to_datetime(pr_df.timestamp_iso)
 
-fig.line(
-    x=pr_times,
-    y=pr_df.pulse_rate_bpm,
-    legend_label='PR',
-    y_range_name='pr',
-    color='red'
-)
+# fig.line(
+#     x=pr_times,
+#     y=pr_df.pulse_rate_bpm,
+#     legend_label='PR',
+#     y_range_name='pr',
+#     color='red'
+# )
 
 import neurokit2 as nk
 # nk.hrv(pr_df., sampling_rate=100, show=True)
@@ -79,7 +140,7 @@ import neurokit2 as nk
 #     color = 'green'
 # )
 
-show(fig)
+# show(fig)
 
 
 

@@ -1,10 +1,16 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import pytz
 from avro.datafile import DataFileReader
 from avro.io import DatumReader
 import json
 import csv
 import os
+import fastavro
+from pandas import DataFrame
 
 
 def generate_csvs_from_avro(avro_file_path: Path):
@@ -90,7 +96,7 @@ def generate_csvs_from_avro(avro_file_path: Path):
     with open(os.path.join(output_dir, 'systolic_peaks.csv'), 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["systolic_peak_timestamp"])
-        writer.writerows([[sp] for sp in sps["peaksTimeNanos"]])
+        writer.writerows([[sp / 1e6] for sp in sps["peaksTimeNanos"]])
 
     # Steps
     steps = data["rawData"]["steps"]
@@ -102,6 +108,69 @@ def generate_csvs_from_avro(avro_file_path: Path):
         writer.writerows([[value] for value in steps["values"]])
 
 
+def generate_dataframes_from_avro(avro_file_path: Path, local_tz=pytz.timezone('Asia/Jerusalem')):
+    with open(avro_file_path, 'rb') as avro_file:
+        reader = fastavro.reader(avro_file)
+        # reader = DataFileReader(open(avro_file_path, "rb"), DatumReader())
+        # schema = json.loads(reader.meta.get('avro.schema').decode('utf-8'))
+        data = next(reader)
+
+        # Eda
+        eda = data["rawData"]["eda"]
+        sampling_rate = eda["samplingFrequency"]
+        start_unix_timestamp = eda["timestampStart"] / 1e6
+        start_dt_utc = datetime.utcfromtimestamp(start_unix_timestamp)
+        num_values = len(eda["values"])
+        time_intervals = np.arange(0, num_values) / sampling_rate
+        datetimes = start_dt_utc + pd.to_timedelta(time_intervals, unit='s')
+        eda_df = pd.DataFrame({'datetime': datetimes, 'value': eda["values"]})
+        if not eda_df.empty:
+            eda_df['datetime'] = eda_df['datetime'].dt.tz_localize(local_tz)
+
+        # Temperature
+        temp = data["rawData"]["temperature"]
+        sampling_rate = temp["samplingFrequency"]
+        start_unix_timestamp = temp["timestampStart"] / 1e6
+        start_dt_utc = datetime.utcfromtimestamp(start_unix_timestamp)
+        num_values = len(temp["values"])
+        time_intervals = np.arange(0, num_values) / sampling_rate
+        datetimes = start_dt_utc + pd.to_timedelta(time_intervals, unit='s')
+        temp_df = pd.DataFrame({'datetime': datetimes, 'value': temp["values"]})
+        if not temp_df.empty:
+            temp_df['datetime'] = temp_df['datetime'].dt.tz_localize(local_tz)
+
+        # Systolic peaks (IBI)
+        sps = data["rawData"]["systolicPeaks"]
+        sps_df = pd.DataFrame({'datetime': [datetime.utcfromtimestamp(sp / 1e9) for sp in sps["peaksTimeNanos"]]})
+        if not sps_df.empty:
+            sps_df['datetime'] = sps_df['datetime'].dt.tz_localize(local_tz)
+
+    return eda_df, temp_df, sps_df
+
+
+def update_db_event(participant, timestamp):
+    api_url = 'https://r4jlflfk41.execute-api.eu-west-1.amazonaws.com/Dev/events'
+    payload = {
+        "patientId": participant,
+        "deviceId": participant,
+        "timestamp": str(timestamp),
+        "location": {
+            "lat": 0.0,
+            "long": 0.0
+        },
+        "eventType": "other",
+        "activity": "other",
+        "severity": 4,
+        "origin": "watch"
+    }
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    print(payload)
+    # response = requests.patch(api_url, headers=headers, json=payload)
+    # print(response.status_code)
+    # print(response.text)
+
 def update_csvs_from_new_avros(avro_root_dir):
     for user_dir in os.listdir(avro_root_dir):
         filenames = os.listdir(os.path.join(avro_root_dir, user_dir))
@@ -111,5 +180,9 @@ def update_csvs_from_new_avros(avro_root_dir):
                     generate_csvs_from_avro(Path(os.path.join(avro_root_dir, user_dir, filename)))
 
 
-avro_root_dir = Path("data/embrace_plus/2024-05-28/0010-3YK3K15223/raw_data")
-update_csvs_from_new_avros(avro_root_dir)
+
+# avro_root_dir = Path("data/embrace_plus/participants_data/007/2025-02-18/007-3YK3K15223/raw_data")
+# update_csvs_from_new_avros(avro_root_dir)
+
+'v2/566/1/1/participant_data/2025-02-18/007-3YK3K15223/raw_data/v6/1-1-007_1739855451.avro'
+'v2/566/1/1/participant_data/2025-02-18/007-3YK3K15223/raw_data/v6/1-1-007_1739855451.avro'
