@@ -111,39 +111,44 @@ def generate_csvs_from_avro(avro_file_path: Path):
 def generate_dataframes_from_avro(avro_file_path: Path, local_tz=pytz.timezone('Asia/Jerusalem')):
     with open(avro_file_path, 'rb') as avro_file:
         reader = fastavro.reader(avro_file)
-        # reader = DataFileReader(open(avro_file_path, "rb"), DatumReader())
-        # schema = json.loads(reader.meta.get('avro.schema').decode('utf-8'))
-        data = next(reader)
 
+        data = next(reader)
+        utc_tz = pytz.timezone('UTC')
         # Eda
         eda = data["rawData"]["eda"]
         sampling_rate = eda["samplingFrequency"]
-        start_unix_timestamp = eda["timestampStart"] / 1e6
-        start_dt_utc = datetime.utcfromtimestamp(start_unix_timestamp)
-        num_values = len(eda["values"])
-        time_intervals = np.arange(0, num_values) / sampling_rate
-        datetimes = start_dt_utc + pd.to_timedelta(time_intervals, unit='s')
-        eda_df = pd.DataFrame({'datetime': datetimes, 'value': eda["values"]})
-        if not eda_df.empty:
-            eda_df['datetime'] = eda_df['datetime'].dt.tz_localize(local_tz)
+        if sampling_rate == 0:
+            eda_df = DataFrame()
+        else:
+            start_unix_timestamp = eda["timestampStart"] / 1e6
+            start_dt_utc = utc_tz.localize(datetime.utcfromtimestamp(start_unix_timestamp))
+            num_values = len(eda["values"])
+            time_intervals = np.arange(0, num_values) / sampling_rate
+            datetimes = start_dt_utc + pd.to_timedelta(time_intervals, unit='s')
+            eda_df = pd.DataFrame({'datetime': datetimes, 'value': eda["values"]})
+            if not eda_df.empty:
+                eda_df['datetime'] = eda_df['datetime'].dt.tz_convert(local_tz)
 
         # Temperature
         temp = data["rawData"]["temperature"]
         sampling_rate = temp["samplingFrequency"]
-        start_unix_timestamp = temp["timestampStart"] / 1e6
-        start_dt_utc = datetime.utcfromtimestamp(start_unix_timestamp)
-        num_values = len(temp["values"])
-        time_intervals = np.arange(0, num_values) / sampling_rate
-        datetimes = start_dt_utc + pd.to_timedelta(time_intervals, unit='s')
-        temp_df = pd.DataFrame({'datetime': datetimes, 'value': temp["values"]})
-        if not temp_df.empty:
-            temp_df['datetime'] = temp_df['datetime'].dt.tz_localize(local_tz)
+        if sampling_rate == 0:
+            temp_df = DataFrame()
+        else:
+            start_unix_timestamp = temp["timestampStart"] / 1e6
+            start_dt_utc = utc_tz.localize(datetime.utcfromtimestamp(start_unix_timestamp))
+            num_values = len(temp["values"])
+            time_intervals = np.arange(0, num_values) / sampling_rate
+            datetimes = start_dt_utc + pd.to_timedelta(time_intervals, unit='s')
+            temp_df = pd.DataFrame({'datetime': datetimes, 'value': temp["values"]})
+            if not temp_df.empty:
+                temp_df['datetime'] = temp_df['datetime'].dt.tz_convert(local_tz)
 
         # Systolic peaks (IBI)
         sps = data["rawData"]["systolicPeaks"]
-        sps_df = pd.DataFrame({'datetime': [datetime.utcfromtimestamp(sp / 1e9) for sp in sps["peaksTimeNanos"]]})
+        sps_df = pd.DataFrame({'datetime': [utc_tz.localize(datetime.utcfromtimestamp(sp / 1e9)) for sp in sps["peaksTimeNanos"]]})
         if not sps_df.empty:
-            sps_df['datetime'] = sps_df['datetime'].dt.tz_localize(local_tz)
+            sps_df['datetime'] = sps_df['datetime'].dt.tz_convert(local_tz)
 
     return eda_df, temp_df, sps_df
 
