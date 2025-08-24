@@ -1,0 +1,25 @@
+﻿severity,timestamp,location,activity,patientId,deviceId,eventType,origin
+2,2025-06-16 06:16:43+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anxiety,remote
+3,2025-06-15 08:14:29+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anger,remote
+-1,2025-06-15 08:14:13+03:00,,other,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,other,remote
+-1,2025-06-15 08:14:13+03:00,,other,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,other,remote
+2,2025-06-14 06:30:37+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,other,remote
+2,2025-06-12 19:13:46+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anger,remote
+2,2025-06-11 07:43:28+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anger,remote
+-1,2025-06-11 07:43:07+03:00,,other,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,other,remote
+2,2025-06-01 08:59:31+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anger,app
+3,2025-05-28 02:36:59+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anxiety,app
+3,2025-05-28 02:24:19+03:00,,eating,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anger,app
+3,2025-05-27 07:41:38+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,other,app
+1,2025-05-23 17:38:28+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,sadness,app
+1,2025-05-23 17:14:37+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,sadness,app
+2,2025-05-23 15:54:21+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,sadness,app
+2,2025-05-22 06:37:52+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,dissociation,app
+3,2025-05-21 06:44:30+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anger,app
+3,2025-05-19 18:33:51+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anger,app
+3,2025-05-18 23:30:42+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anger,app
+4,2025-05-18 21:45:44+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,anger,app
+1,2025-05-18 18:44:19+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,sadness,app
+3,2025-05-18 13:41:38+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,other,app
+3,2025-05-14 15:45:37+03:00,,eating,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,other,app
+2,2025-05-14 15:44:11+03:00,,rest,3ea8a22b-0c49-4f36-8b77-b89b84c081a4,f73cb4ca-9ffb-429f-b42b-5fc90b0d711a,sadness,app

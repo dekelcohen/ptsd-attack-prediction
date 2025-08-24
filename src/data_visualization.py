@@ -56,9 +56,9 @@ def main():
     biomarker_dfs, filtered_df = prepare_data(biomarker_names, data_root_dir, jerusalem_tz, trial_starting_date,
                                               user_id, override=False)
 
-    # visualize_statistics(biomarker_dfs)
-    # visualize_data(biomarker_dfs, filtered_df, split=True)
+    visualize_data(biomarker_dfs, filtered_df, split=True)
     visualize_events(biomarker_dfs, filtered_df)
+    visualize_statistics(biomarker_dfs)
 
 
 def visualize_statistics(biomarker_dfs):
