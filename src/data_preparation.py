@@ -140,3 +140,99 @@ def convert_to_4hz(df):
     # Interpolate the heart rate values to fill NaN values
     full_result_df['hr_per_minute'] = full_result_df['hr_per_minute'].interpolate()
     return full_result_df
+
+
+def df_timestamp_to_israel_time(df, timestamp_col):
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+    if df[timestamp_col].dt.tz is None:
+        # tz-naive → localize first
+        df['timestamp_israel'] = df[timestamp_col].dt.tz_localize('UTC').dt.tz_convert('Asia/Jerusalem')
+    else:
+        # already tz-aware → just convert
+        df['timestamp_israel'] = df[timestamp_col].dt.tz_convert('Asia/Jerusalem')
+    return df
+
+
+def create_biomarkers_data_for_patient(path, patients_dict, data, patient):
+    for day in os.listdir(path):
+        join_path = os.path.join(path, day)
+        for temp_patient in os.listdir(join_path):
+            if temp_patient == patients_dict[patient]:
+                day_biomarkers = pd.DataFrame()
+                digital_biomarker_path = os.path.join(join_path, patients_dict[patient],
+                                                      r'digital_biomarkers\aggregated_per_minute')
+                for file in os.listdir(digital_biomarker_path):
+                    df = pd.read_csv(os.path.join(digital_biomarker_path, file))
+                    df = df_timestamp_to_israel_time(df, timestamp_col='timestamp_iso')
+                    if day_biomarkers.empty:
+                        day_biomarkers = df
+                    else:
+                        exclude = {'participant_full_id', 'timestamp_iso', 'timestamp_unix',
+                                   'missing_value_reason'}
+
+                        cols_from_df = [c for c in df.columns if c not in exclude]
+
+                        day_biomarkers = day_biomarkers.merge(
+                            df[cols_from_df],
+                            on="timestamp_israel",
+                            how="left"
+                        )
+                data = pd.concat([data, day_biomarkers])
+    if 'missing_value_reason' not in data.keys():
+        print(1)
+    data = data[~data['missing_value_reason'].isin(['device_not_recording', 'device_not_worn_correctly'])]
+    return data
+
+
+def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
+    # Set index to timestamp for both eventType and severity
+    tags_by_time = tags.set_index('timestamp_israel')[['eventType', 'severity']]
+
+    # Remove duplicate timestamps, keeping the last occurrence
+    tags_by_time = tags_by_time[~tags_by_time.index.duplicated(keep='last')]
+    tags_by_time = tags_by_time[(tags_by_time['severity'] != -1) & (tags_by_time['severity'] != 0)]
+
+    # Find nearest events for both columns
+    nearest_events = tags_by_time.reindex(
+        data['timestamp_israel'],
+        method='nearest',
+        tolerance=pd.Timedelta(time)
+    )
+
+    # Copy data and add both eventType and severity columns
+    data_with_event = data.copy()
+    data_with_event['eventType'] = nearest_events['eventType'].values
+    data_with_event['severity'] = nearest_events['severity'].values
+
+    # rows WITH matching tag (where eventType is not null)
+    df_selected = data_with_event[data_with_event['eventType'].notna()]
+
+    # rows WITHOUT matching tag (where eventType is null)
+    df_remaining = data_with_event[data_with_event['eventType'].isna()]
+
+    return df_selected, df_remaining
+
+
+def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min'):
+    filtered_around_tags_data = pd.DataFrame()
+    remaining_data = pd.DataFrame()
+    total_number_of_tags = 0
+    total_number_of_tags_per_patient = {}
+    for file in os.listdir(tags_path):
+        if file.endswith(".csv"):
+            patient = file.split("_")[0]
+            if patient in patients_dict.keys():
+                tags = pd.read_csv(os.path.join(tags_path, file))
+                # tags = tags[tags['eventType'] != 'other']
+                tags = df_timestamp_to_israel_time(tags, timestamp_col='timestamp')
+                total_number_of_tags += len(tags)
+                total_number_of_tags_per_patient[patient] = len(tags)
+                data = pd.DataFrame()
+                data = create_biomarkers_data_for_patient(data_path, patients_dict, data, patient)
+
+                filtered_data, other_data = filter_biomarkers_data_around_tags_for_patient(tags, data, time)
+                filtered_around_tags_data = pd.concat([filtered_around_tags_data, filtered_data])
+                remaining_data = pd.concat([remaining_data, other_data])
+    print('Total number of tags: ', total_number_of_tags)
+    print('Total number of tags per patient: \n', total_number_of_tags_per_patient)
+    return filtered_around_tags_data, remaining_data
