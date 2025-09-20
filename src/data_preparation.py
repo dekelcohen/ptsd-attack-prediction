@@ -143,6 +143,30 @@ def convert_to_4hz(df):
 
 
 def df_timestamp_to_israel_time(df, timestamp_col):
+    """
+    Convert a timestamp column in a DataFrame to Israel local time (Asia/Jerusalem).
+
+    The function accepts either tz-naive or tz-aware timestamps:
+    - If the column is tz-naive, it is interpreted as UTC, localized to UTC,
+      and then converted to Asia/Jerusalem.
+    - If the column is tz-aware, it is directly converted to Asia/Jerusalem.
+
+    A new column named ``timestamp_israel`` is added to ``df`` with the converted
+    timezone-aware timestamps.
+
+    Args:
+        df (pandas.DataFrame): Input DataFrame containing a timestamp column.
+        timestamp_col (str): Name of the timestamp column to convert.
+
+    Returns:
+        pandas.DataFrame: The same DataFrame with an added ``timestamp_israel`` column
+        (dtype: datetime64[ns, Asia/Jerusalem]). The original ``timestamp_col`` is parsed
+        to datetime if needed.
+
+    Notes:
+        - This function assumes tz-naive values are in UTC.
+        - The output column is timezone-aware (not naive).
+    """
     df[timestamp_col] = pd.to_datetime(df[timestamp_col])
     if df[timestamp_col].dt.tz is None:
         # tz-naive → localize first
@@ -154,6 +178,36 @@ def df_timestamp_to_israel_time(df, timestamp_col):
 
 
 def create_biomarkers_data_for_patient(path, patients_dict, data, patient):
+    """
+    Aggregate per-minute digital biomarker CSVs for a single patient across all days.
+
+    The function walks the directory structure under ``path`` expecting a layout like:
+        <path>/<day>/<patient_folder>/digital_biomarkers/aggregated_per_minute/*.csv
+
+    It filters for a predefined set of biomarker files and merges them on
+    ``timestamp_israel`` after converting each file's ``timestamp_iso`` to Israel time.
+    Columns used only for alignment/metadata are excluded from duplicate merges.
+
+    Args:
+        path (str): Root directory containing day folders.
+        patients_dict (dict): Mapping from patient short ID to folder name, e.g.
+            ``{'P01': 'participant_0001'}``.
+        data (pandas.DataFrame): Initial DataFrame to append results to (can be empty).
+        patient (str): Patient short ID (key in ``patients_dict``) to process.
+
+    Returns:
+        pandas.DataFrame: Concatenated DataFrame of per-minute biomarkers for the
+        specified patient across all available days. Includes a timezone-aware
+        ``timestamp_israel`` column.
+
+    Expected Input Columns (per CSV):
+        - ``timestamp_iso`` (ISO-8601 string) used for time conversion.
+        - Optional metadata: ``participant_full_id``, ``timestamp_unix``,
+          ``missing_value_reason`` (excluded from merge when duplicative).
+    """
+    biomarker_file_names = ["eda.csv", "temperature.csv", "accelerometers-std.csv",
+                            "pulse-rate.csv", "activity-counts.csv"]
+
     for day in os.listdir(path):
         join_path = os.path.join(path, day)
         for temp_patient in os.listdir(join_path):
@@ -162,6 +216,8 @@ def create_biomarkers_data_for_patient(path, patients_dict, data, patient):
                 digital_biomarker_path = os.path.join(join_path, patients_dict[patient],
                                                       r'digital_biomarkers\aggregated_per_minute')
                 for file in os.listdir(digital_biomarker_path):
+                    if file.split('_')[-1] not in biomarker_file_names:
+                        continue
                     df = pd.read_csv(os.path.join(digital_biomarker_path, file))
                     df = df_timestamp_to_israel_time(df, timestamp_col='timestamp_iso')
                     if day_biomarkers.empty:
@@ -178,19 +234,38 @@ def create_biomarkers_data_for_patient(path, patients_dict, data, patient):
                             how="left"
                         )
                 data = pd.concat([data, day_biomarkers])
-    if 'missing_value_reason' not in data.keys():
-        print(1)
     data = data[~data['missing_value_reason'].isin(['device_not_recording', 'device_not_worn_correctly'])]
     return data
 
 
 def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
+    """
+    Label biomarker rows by the nearest positive-severity tag within a time tolerance.
+
+    For each row in ``data``, the function finds the nearest event in ``tags`` within
+    ``tolerance = pd.Timedelta(time)`` (default 15 minutes), using the
+    ``timestamp_israel`` index. Only tags with ``severity > 0`` are considered.
+    The result is split into two DataFrames:
+      - ``df_selected``: rows that matched a nearby tag (with added ``eventType`` and ``severity``)
+      - ``df_remaining``: rows without a nearby tag
+
+    Args:
+        tags (pandas.DataFrame): Tag data containing at least
+            ``['timestamp_israel', 'eventType', 'severity']``.
+        data (pandas.DataFrame): Biomarker data containing ``timestamp_israel``.
+        time (str | pandas.Timedelta, optional): Time tolerance for nearest-match
+            (e.g., '15min', '5m', '1H'). Defaults to '15min'.
+
+    Returns:
+        tuple[pandas.DataFrame, pandas.DataFrame]:
+            (df_selected, df_remaining) as described above.
+    """
+    positive_tags = tags[tags['severity'] > 0]
     # Set index to timestamp for both eventType and severity
-    tags_by_time = tags.set_index('timestamp_israel')[['eventType', 'severity']]
+    tags_by_time = positive_tags.set_index('timestamp_israel')[['eventType', 'severity']]
 
     # Remove duplicate timestamps, keeping the last occurrence
     tags_by_time = tags_by_time[~tags_by_time.index.duplicated(keep='last')]
-    tags_by_time = tags_by_time[(tags_by_time['severity'] != -1) & (tags_by_time['severity'] != 0)]
 
     # Find nearest events for both columns
     nearest_events = tags_by_time.reindex(
@@ -214,6 +289,30 @@ def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
 
 
 def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min'):
+    """
+    Build labeled biomarker datasets by (a) aggregating per-patient biomarker streams
+    and (b) aligning them to nearby positive-severity tags.
+
+    For each ``<patient>_*.csv`` file in ``tags_path``:
+      1) Load tags, convert their timestamps to Israel time.
+      2) Aggregate that patient's biomarker per-minute CSVs from ``data_path``.
+      3) Match biomarker rows to the nearest tag within ``time`` tolerance.
+      4) Concatenate matched rows across all patients/days, and also keep unmatched rows.
+
+    Args:
+        patients_dict (dict): Mapping from patient short ID to folder name in the data root.
+        tags_path (str): Directory containing per-patient tag CSV files. Filenames
+            should start with the patient key, e.g., ``P01_events.csv``.
+        data_path (str): Root directory for biomarker data (see
+            ``create_biomarkers_data_for_patient`` for expected structure).
+        time (str | pandas.Timedelta, optional): Tolerance for tag matching. Defaults to '15min'.
+
+    Returns:
+        tuple[pandas.DataFrame, pandas.DataFrame]:
+            - ``filtered_around_tags_data``: biomarker rows matched to nearby positive tags,
+              with ``eventType`` and ``severity`` attached.
+            - ``remaining_data``: biomarker rows with no nearby positive tag.
+    """
     filtered_around_tags_data = pd.DataFrame()
     remaining_data = pd.DataFrame()
     total_number_of_tags = 0
