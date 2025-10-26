@@ -4,6 +4,7 @@ from datetime import datetime
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.preprocessing import StandardScaler
 
 from sklearn.utils import resample
 from sklearn.metrics import confusion_matrix, PrecisionRecallDisplay, precision_recall_curve
@@ -12,11 +13,12 @@ import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 
-from data_preparation import prepare_biomarkers_data
+from data_preparation import prepare_biomarkers_data, create_chunked_data
 
 
 class xgboost_model():
-    def __init__(self, X_train, X_test, y_train, y_test, multiclassification, output_dir):
+    def __init__(self, X_train, X_test, y_train, y_test, multiclassification, output_dir,
+                 n_estimators=100, max_depth=6, learning_rate=0.3, subsample=1.0):
         self.multiclassification = multiclassification
         self.output_dir = output_dir
         num_classes = set(pd.concat([y_train, y_test]))
@@ -33,12 +35,19 @@ class xgboost_model():
             )
         else:
             self.model = xgb.XGBClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                subsample=subsample,
+
                 random_state=42,
                 objective="binary:logistic",
                 use_label_encoder=False,
                 eval_metric="logloss",
                 scale_pos_weight=scale_pos_weight
             )
+
+        self.threshold = 0.5
 
     def run_model(self):
         self.model.fit(self.X_train, self.y_train)
@@ -70,6 +79,7 @@ class xgboost_model():
             # The last precision and recall values are 1. and 0. respectively and do not have a corresponding threshold.
             # So we slice the F1 scores to match the number of thresholds.
             best_threshold = thresholds[np.argmax(f1_scores[:-1])]
+            self.threshold = best_threshold
 
             print(f"Best Threshold based on F1-Score: {best_threshold:.4f}")
 
@@ -78,7 +88,7 @@ class xgboost_model():
 
             # 4. Compare the new classification report with the old one
             print("\n--- New Threshold Classification Report (with custom threshold) ---")
-            report = classification_report(self.y_test, new_predictions, target_names=['No Stress', 'Stress'])
+            report = classification_report(self.y_test, new_predictions, target_names=['No Stress', 'Stress'], digits=4)
             with open(f"{self.output_dir}/classification_report.txt", "w") as f:
                 f.write(report)
             print(report)
@@ -112,7 +122,7 @@ def prep_onehotencoded_columns(orgX, data):
     filtered_data["hour"] = filtered_data["timestamp_israel"].dt.hour
     filtered_data["dow"] = filtered_data["timestamp_israel"].dt.dayofweek
     filtered_data["dom"] = filtered_data["timestamp_israel"].dt.day
-    time_columns = ['timestamp_unix', 'timestamp_iso', 'timestamp', 'timestamp_israel']
+    time_columns = ['timestamp_unix', 'timestamp_iso', 'timestamp']  # , 'timestamp_israel']
     cols_to_remove = time_columns + ['missing_value_reason'] + ['prv_rmssd_ms',
                                                                 'respiratory_rate_brpm',
                                                                 # 'pulse_rate_bpm'
@@ -141,7 +151,7 @@ def prep_onehotencoded_columns(orgX, data):
     # X = create_encoding(X, 'body_position_right', body_position_right_classes)
 
     print(f"Data Shape: {X.shape}")
-    print(f"Columns: {list(X.columns)}")
+    # print(f"Columns: {list(X.columns)}")
     return X
 
 
@@ -200,7 +210,8 @@ def downsample_data(orgX, precentage_of_1=50, multiclassification=False):
     return df_balanced
 
 
-def prep_data(positive_data, negative_data, multiclassification=False, participent_in_test=None, split_by_time=False):
+def prep_data(positive_data, negative_data, multiclassification=False, participent_in_test=None, split_by_time=None,
+              standard_scale=False, num_weeks=None):
     if multiclassification:
         positive_data['classification'] = positive_data['severity']
 
@@ -223,10 +234,29 @@ def prep_data(positive_data, negative_data, multiclassification=False, participe
 
     X = prep_onehotencoded_columns(orgX, orgX)
 
-    if participent_in_test:
+    if split_by_time:
+        cutoff = X['timestamp_israel'].max() - pd.Timedelta(days=split_by_time)
+
+        X_train = X[X['timestamp_israel'] <= cutoff]
+        X_test = X[X['timestamp_israel'] > cutoff]
+        y_train = X_train['classification']
+        y_test = X_test['classification']
+        print(f'total events in train set: {y_train.value_counts()[1]}')
+        print(f'total events in test set: {y_test.value_counts()[1]}')
+
+    elif participent_in_test:
         X_test = X[X['participant_full_id'].str.contains(participent_in_test, na=False)]
         X_train = X[~X['participant_full_id'].str.contains(participent_in_test, na=False)]
+
         # X_train, _ = self.downsample_data(X_train, precentage_of_1=30)
+        if num_weeks:
+            # Find the first timestamp in the DataFrame
+            start_date = X_test['timestamp_israel'].min()
+            # Define the end of the first week
+            end_date = start_date + pd.Timedelta(weeks=i)
+            X_week_data = X_test[(X_test['timestamp_israel'] >= start_date) & (X_test['timestamp_israel'] < end_date)]
+            X_test.drop(X_week_data.index)
+            X_train = X_week_data
 
         y_train = X_train['classification']
         y_test = X_test['classification']
@@ -235,12 +265,42 @@ def prep_data(positive_data, negative_data, multiclassification=False, participe
     else:
         # X = downsample_data(X)
         y = X['classification']
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+        # X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+        unique_days = X["timestamp_israel"].unique()
+
+        # Split on days instead of samples
+        train_days, test_days = train_test_split(
+            unique_days, test_size=0.25, random_state=42
+        )
+
+        # Build train/test sets based on days
+        train_mask = X["timestamp_israel"].isin(train_days)
+        test_mask = X["timestamp_israel"].isin(test_days)
+
+        X_train, X_test = X[train_mask], X[test_mask]
+        y_train, y_test = y[train_mask], y[test_mask]
 
     X_train = X_train.drop(['classification'], axis=1)
     X_train = X_train.drop(['participant_full_id'], axis=1)
+    X_train = X_train.drop(['timestamp_israel'], axis=1)
+
     X_test = X_test.drop(['classification'], axis=1)
     X_test = X_test.drop(['participant_full_id'], axis=1)
+    X_test = X_test.drop(['timestamp_israel'], axis=1)
+
+    X_train = X_train.drop(['hour'], axis=1)
+    X_train = X_train.drop(['dow'], axis=1)
+    X_train = X_train.drop(['dom'], axis=1)
+    X_test = X_test.drop(['hour'], axis=1)
+    X_test = X_test.drop(['dow'], axis=1)
+    X_test = X_test.drop(['dom'], axis=1)
+
+    if standard_scale:
+        scaler = StandardScaler().fit(X_train)
+
+        X_train = scaler.transform(X_train)
+        X_test = scaler.transform(X_test)
+        return X_train, X_test, y_train, y_test, scaler
 
     return X_train, X_test, y_train, y_test
 
@@ -262,18 +322,70 @@ def plot_prediction_time_graphs(df, output_dir):
         plt.close()
 
 
-
 if __name__ == '__main__':
-    patients_dict = {'TRAIL001': 'TRAIL001-3YK3L151K2',
-                     'TRAIL002': 'TRAIL002-3YK3J1514F',
-                     'TRAIL003': 'TRAIL003-3YK3K153QJ',
-                     'TRAIL004': 'TRAIL004-3YK3J151CV',
-                     'TRAIL005': 'TRAIL005-3YK3L151DR'}
+    patients_dict = {
+        'TRAIL001': 'TRAIL001-3YK3L151K2',
+        'TRAIL002': 'TRAIL002-3YK3J1514F',
+        'TRAIL003': 'TRAIL003-3YK3K153QJ',
+        'TRAIL004': 'TRAIL004-3YK3J151CV',
+        'TRAIL005': 'TRAIL005-3YK3L151DR'}
+    eval_patients_dict = {
+        'TRAIL008': 'TRAIL008-3YK3J1514F',
+        'TRAIL009': 'TRAIL009-3YKC51P1YL'
+    }
+    trail_dates = {
+        'TRAIL003': {'start_date': '30.3.2025 16:04', 'end_date': '29.4.2025 17:40'},
+        'TRAIL002': {'start_date': '9.4.2025 14:28', 'end_date': '8.5.2025 19:30'},
+        'TRAIL001': {'start_date': '24.4.2025 11:40', 'end_date': '23.5.2025 10:21'},
+        'TRAIL004': {'start_date': '27.4.2025 15:00', 'end_date': '26.5.2025 14:25'},
+        'TRAIL005': {'start_date': '14.5.2025 11:56', 'end_date': '17.6.2025 00:00'},
+        'TRAIL008': {'start_date': '10.7.2025 14:50', 'end_date': '10.8.2025 00:00'},
+        'TRAIL009': {'start_date': '31.7.2025 13:15', 'end_date': '29.8.2025 10:00'},
+    }
+    fmt = "%d.%m.%Y %H:%M"
+    trail_dates_ts = {
+        k: {
+            'start_date': datetime.strptime(v['start_date'], fmt),
+            'end_date': datetime.strptime(v['end_date'], fmt),
+        }
+        for k, v in trail_dates.items()
+    }
+
+    time = '15min'
+    window_minutes = 15
+    step_minutes = 3
+    normalize = True
+    standard_scaling = False
 
     tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
     data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-    time = '15min'
-    positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time)
+    chunked_data_path = fr"C:\Users\GONY\Desktop\Booggii\processed_data\{window_minutes}min_{step_minutes}step{'_normalized_' if normalize else ''}"
+
+    if os.path.exists(chunked_data_path):
+        print('loading existing pickle files:')
+        positive_data = pd.read_pickle(
+            chunked_data_path + rf"\train_eval_positive_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
+        negative_data = pd.read_pickle(
+            chunked_data_path + rf"\train_eval_negative_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
+        eval_positive_data = pd.read_pickle(
+            chunked_data_path + rf"\test_positive_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
+        eval_negative_data = pd.read_pickle(
+            chunked_data_path + rf"\test_negative_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
+    else:
+        os.makedirs(chunked_data_path, exist_ok=True)
+        print('creating data')
+
+        positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time, trail_dates_ts)
+        negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes, step_minutes=step_minutes)
+        positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes, step_minutes=step_minutes)
+        positive_data.to_pickle(chunked_data_path + rf'\train_eval_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+        negative_data.to_pickle(chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+
+        eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path, time, trail_dates_ts)
+        eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict, window_minutes=window_minutes, step_minutes=step_minutes)
+        eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict, window_minutes=window_minutes, step_minutes=step_minutes)
+        eval_positive_data.to_pickle(chunked_data_path + rf'\test_positive_data_normalize_{window_minutes}min_{step_minutes}step.pkl')
+        eval_negative_data.to_pickle(chunked_data_path + rf'\test_negative_data_normalize_{window_minutes}min_{step_minutes}step.pkl')
 
     multiclassification = False
     now = datetime.now()
@@ -282,55 +394,60 @@ if __name__ == '__main__':
     output_dir = os.path.join(r'C:\Users\GONY\Desktop\Booggii\results\xgboost_output', 'results', time_str)
     os.makedirs(output_dir, exist_ok=True)
 
-    #### ALL DATA
+    # ### ALL DATA
     # X_train, X_test, y_train, y_test = prep_data(positive_data, negative_data, multiclassification=multiclassification)
     # xgboost = xgboost_model(X_train, X_test, y_train, y_test, multiclassification=multiclassification,
     #                         output_dir=output_dir)
     #
     # xgboost.run_model()
 
-    #### TRAINED SEPERATLY FOR EACH PARTICIPANT
-    positive_data['id'] = np.arange(1, 1 + len(positive_data))
-    negative_data['id'] = np.arange(1 + len(positive_data), 1 + len(positive_data) + len(negative_data))
-    for patient in patients_dict.keys():
-        print(f'XGBoost trained only for patient {patient}')
-        pos_data = positive_data[positive_data['participant_full_id'].str.contains(patient, na=False)]
-        neg_data = negative_data[negative_data['participant_full_id'].str.contains(patient, na=False)]
-        temp_path = os.path.join(output_dir, f'trained_on_{patient}')
-        os.makedirs(temp_path, exist_ok=True)
-        X_train, X_test, y_train, y_test = prep_data(pos_data, neg_data)
-        xgboost = xgboost_model(X_train.drop(columns=['id']), X_test.drop(columns=['id']), y_train, y_test, output_dir=temp_path, multiclassification=False)
+    # # TRAINED SEPERATLY FOR EACH PARTICIPANT
+    #
+    # positive_data = pd.concat([positive_data, eval_positive_data])
+    # negative_data = pd.concat([negative_data, eval_negative_data])
+    # positive_data['id'] = np.arange(1, 1 + len(positive_data))
+    # negative_data['id'] = np.arange(1 + len(positive_data), 1 + len(positive_data) + len(negative_data))
+    # patients_dict.update(eval_patients_dict)
+    #
+    # for patient in patients_dict.keys():
+    #     print(f'XGBoost trained only for patient {patient}')
+    #     pos_data = positive_data[positive_data['participant_full_id'].str.contains(patient, na=False)]
+    #     neg_data = negative_data[negative_data['participant_full_id'].str.contains(patient, na=False)]
+    #     temp_path = os.path.join(output_dir, f'trained_on_{patient}')
+    #     os.makedirs(temp_path, exist_ok=True)
+    #     X_train, X_test, y_train, y_test = prep_data(pos_data, neg_data)
+    #     xgboost = xgboost_model(X_train.drop(columns=['id']), X_test.drop(columns=['id']), y_train, y_test, output_dir=temp_path, multiclassification=False)
+    #
+    #     xgboost.run_model()
+    #
+    #     y_pred = xgboost.model.predict_proba(X_test.drop(columns=['id']))[:, 1]
+    #     precision, recall, thresholds = precision_recall_curve(y_test, y_pred)
+    #     f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
+    #     best_threshold = thresholds[np.argmax(f1_scores[:-1])]
+    #     new_predictions = (y_pred >= best_threshold).astype(int)
+    #     X_test['pred'] = new_predictions
+    #     X_test['true'] = y_test
+    #
+    #     # Build a single {id -> timestamp} map from df1 & df2
+    #     ts_lookup = (
+    #         pd.concat([
+    #             pos_data[['id', 'timestamp_israel']].dropna(subset=['timestamp_israel']),
+    #             neg_data[['id', 'timestamp_israel']].dropna(subset=['timestamp_israel'])
+    #         ])
+    #         .drop_duplicates('id', keep='last')  # in case of overlap
+    #         .set_index('id')['timestamp_israel']
+    #     )
+    #
+    #     # Assign (or fill) in df3
+    #     if 'timestamp_israel' in X_test:
+    #         X_test['timestamp_israel'] = X_test['timestamp_israel'].fillna(X_test['id'].map(ts_lookup))
+    #     else:
+    #         X_test['timestamp_israel'] = X_test['id'].map(ts_lookup)
+    #     temp_path = os.path.join(temp_path, f'prediction_time_graphs')
+    #     os.makedirs(temp_path, exist_ok=True)
+    #     plot_prediction_time_graphs(X_test, temp_path)
 
-        xgboost.run_model()
-
-        y_pred = xgboost.model.predict_proba(X_test.drop(columns=['id']))[:, 1]
-        precision, recall, thresholds = precision_recall_curve(y_test, y_pred)
-        f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
-        best_threshold = thresholds[np.argmax(f1_scores[:-1])]
-        new_predictions = (y_pred >= best_threshold).astype(int)
-        X_test['pred'] = new_predictions
-        X_test['true'] = y_test
-
-        # Build a single {id -> timestamp} map from df1 & df2
-        ts_lookup = (
-            pd.concat([
-                pos_data[['id', 'timestamp_israel']].dropna(subset=['timestamp_israel']),
-                neg_data[['id', 'timestamp_israel']].dropna(subset=['timestamp_israel'])
-            ])
-            .drop_duplicates('id', keep='last')  # in case of overlap
-            .set_index('id')['timestamp_israel']
-        )
-
-        # Assign (or fill) in df3
-        if 'timestamp_israel' in X_test:
-            X_test['timestamp_israel'] = X_test['timestamp_israel'].fillna(X_test['id'].map(ts_lookup))
-        else:
-            X_test['timestamp_israel'] = X_test['id'].map(ts_lookup)
-        temp_path = os.path.join(temp_path, f'prediction_time_graphs')
-        os.makedirs(temp_path, exist_ok=True)
-        plot_prediction_time_graphs(X_test, temp_path)
-
-    #### CROSS VALIDATION ON EACH PARTICIPANT
+    # ### CROSS VALIDATION ON EACH PARTICIPANT
     # positive_data['id'] = np.arange(1, 1 + len(positive_data))
     # negative_data['id'] = np.arange(1 + len(positive_data), 1 + len(positive_data) + len(negative_data))
     # for patient in patients_dict.keys():
@@ -369,3 +486,96 @@ if __name__ == '__main__':
     #     temp_path = os.path.join(temp_path, f'prediction_time_graphs')
     #     os.makedirs(temp_path, exist_ok=True)
     #     plot_prediction_time_graphs(X_test, temp_path)
+
+    ### eval on patients 8 & 9
+
+    # if standard_scaling:
+    #     X_train, X_val, y_train, y_val, scaler = prep_data(positive_data, negative_data,
+    #                                                  multiclassification=multiclassification, standard_scale=standard_scaling)
+    # else:
+    #     X_train, X_val, y_train, y_val = prep_data(positive_data, negative_data, multiclassification=multiclassification, standard_scale=False)
+    # xgboost = xgboost_model(X_train, X_val, y_train, y_val, multiclassification=multiclassification,
+    #                         output_dir=output_dir,
+    #                         n_estimators=100, max_depth=5, learning_rate=0.01, subsample=0.8
+    #                         )
+    # xgboost.run_model()
+    # for patient in eval_patients_dict.keys():
+    #     print(f'XGBoost evaluated on patient {patient}')
+    #     temp_path = os.path.join(output_dir, f'eval_{patient}')
+    #     os.makedirs(temp_path, exist_ok=True)
+    #     _, X_test, _, y_test = prep_data(eval_positive_data, eval_negative_data, participent_in_test=patient)
+    #     if standard_scaling:
+    #         X_test = scaler.transform(X_test)
+    #     y_pred = xgboost.model.predict_proba(X_test)[:, 1]
+    #     new_predictions = (y_pred >= xgboost.threshold).astype(int)
+    #
+    #     report = classification_report(y_test, new_predictions, target_names=['No Stress', 'Stress'], digits=4)
+    #     with open(f"{temp_path}/classification_report.txt", "w") as f:
+    #         f.write(report)
+    #     print(report)
+    #
+    #     cm = confusion_matrix(y_test, new_predictions)
+    #     plt.figure(figsize=(6, 5))
+    #     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False)
+    #     plt.xlabel("Predicted")
+    #     plt.ylabel("Actual")
+    #     plt.title("Confusion Matrix")
+    #     plt.savefig(os.path.join(temp_path, "confusion_matrix.png"), dpi=300, bbox_inches="tight")
+    #     plt.close()
+    #     print(temp_path)
+
+    ### eval on patients 8 & 9 with added week in training
+    for patient in eval_patients_dict.keys():
+        for i in range(0, 6):
+            X_train, X_val, y_train, y_val = prep_data(positive_data, negative_data,
+                                                       multiclassification=multiclassification, standard_scale=False)
+            xgboost = xgboost_model(X_train, X_val, y_train, y_val, multiclassification=multiclassification,
+                                    output_dir=output_dir,
+                                    n_estimators=50, max_depth=7, learning_rate=0.01, subsample=0.8
+                                    )
+            xgboost.run_model()
+            print(f'patients {patient} with {i} weeks in training')
+            temp_path = os.path.join(output_dir, f'eval_{patient}_weeks_in_training_{i}')
+            os.makedirs(temp_path, exist_ok=True)
+            X_week_data, X_test, y_week_data, y_test = prep_data(eval_positive_data, eval_negative_data,
+                                                                 participent_in_test=patient, num_weeks=i)
+
+            if i>0:
+                try:
+                    positive_events = y_week_data.value_counts()[1]
+                except KeyError:
+                    positive_events = 0
+
+                print(f'events of patient {patient} added to training {positive_events}')
+                num_boost_round = 15
+                xgboost.model.fit(
+                    X_week_data, y_week_data,
+                    xgb_model= xgboost.model.get_booster(),  # <— resume from existing trees
+                    eval_set=[(X_week_data, y_week_data)],
+                    verbose=False
+                )
+
+            y_pred = xgboost.model.predict_proba(X_test)[:, 1]
+
+            precision, recall, thresholds = precision_recall_curve(y_test, y_pred)
+            f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
+            best_threshold = thresholds[np.argmax(f1_scores[:-1])]
+            xgboost.threshold = best_threshold
+
+            y_pred = xgboost.model.predict_proba(X_test)[:, 1]
+            new_predictions = (y_pred >= xgboost.threshold).astype(int)
+
+            report = classification_report(y_test, new_predictions, target_names=['No Stress', 'Stress'], digits=4)
+            with open(f"{temp_path}/classification_report.txt", "w") as f:
+                f.write(report)
+            print(report)
+
+            cm = confusion_matrix(y_test, new_predictions)
+            plt.figure(figsize=(6, 5))
+            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False)
+            plt.xlabel("Predicted")
+            plt.ylabel("Actual")
+            plt.title("Confusion Matrix")
+            plt.savefig(os.path.join(temp_path, "confusion_matrix.png"), dpi=300, bbox_inches="tight")
+            plt.close()
+            print(temp_path)
