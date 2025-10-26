@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
+from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import pytz
 from pandas import DataFrame
@@ -108,7 +110,6 @@ def remove_invalid_minutes(invalid_minutes_df, all_minutes_df):
 
 
 def calculate_hr(df: pd.DataFrame, timestamp_column: str = 'datetime') -> pd.DataFrame:
-
     # Calculate the time difference between consecutive systolic peaks in seconds
     df['time_diff'] = df['datetime'].diff().dt.total_seconds()
 
@@ -177,7 +178,7 @@ def df_timestamp_to_israel_time(df, timestamp_col):
     return df
 
 
-def create_biomarkers_data_for_patient(path, patients_dict, data, patient):
+def create_biomarkers_data_for_patient(path, patients_dict, data, patient, trail_dates_dict):
     """
     Aggregate per-minute digital biomarker CSVs for a single patient across all days.
 
@@ -209,6 +210,9 @@ def create_biomarkers_data_for_patient(path, patients_dict, data, patient):
                             "pulse-rate.csv", "activity-counts.csv"]
 
     for day in os.listdir(path):
+        day_date = datetime.strptime(day, "%Y-%m-%d").date()
+        if day_date < trail_dates_dict[patient]['start_date'].date() or day_date > trail_dates_dict[patient]['end_date'].date():
+            continue
         join_path = os.path.join(path, day)
         for temp_patient in os.listdir(join_path):
             if temp_patient == patients_dict[patient]:
@@ -266,6 +270,7 @@ def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
 
     # Remove duplicate timestamps, keeping the last occurrence
     tags_by_time = tags_by_time[~tags_by_time.index.duplicated(keep='last')]
+    tags_by_time = tags_by_time.sort_index(kind='mergesort')  # ✅ critical for 'nearest'
 
     # Find nearest events for both columns
     nearest_events = tags_by_time.reindex(
@@ -288,7 +293,165 @@ def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
     return df_selected, df_remaining
 
 
-def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min'):
+def _robust_z(x):
+    x = pd.to_numeric(x, errors="coerce")
+    med = np.nanmedian(x)
+    mad = np.nanmedian(np.abs(x - med))
+    return (x - med) / (mad + 1e-6)
+
+
+def _cos_night_prior(ts, night_center_hour=3, night_width_hours=10):
+    """
+    Smooth circadian prior in [0,1], peaking at `night_center_hour`, wide ~ `night_width_hours`.
+    Uses a raised cosine: prior = clip(0.5*(1 + cos(2π*(Δhour)/width)), 0, 1)
+    where Δhour is wrapped difference between local hour and night_center_hour.
+    """
+    hours = ts.dt.hour + ts.dt.minute / 60.0
+    # Wrap difference into [-12,12]
+    delta = ((hours - night_center_hour + 12) % 24) - 12
+    prior = 0.5 * (1 + np.cos(np.pi * np.clip(delta / (night_width_hours / 2), -1, 1)))
+    return prior
+
+
+def _label_sleep_awake(
+        df,
+        time_col="timestamp_israel",
+        hr_col="pulse_rate_bpm",
+        activity_cols=None,  # e.g., ["activity_counts", "accelerometers_std_g"]
+        w_hr=0.7,  # weight for HR evidence
+        w_time=0.3,  # weight for time-of-day prior
+        night_center_hour=3,
+        night_width_hours=10,
+        min_sleep_bout_minutes=20,  # post-processing to reduce flicker
+        hr_clip_z=(-3, 3),  # clip HR z to stabilize
+):
+    """
+    Adds a 'state' column with 'sleep'/'awake' per subject.
+    Heuristic: low HR (subject-robust z) + night prior => sleep.
+    Optionally nudged by low movement if activity_cols provided.
+    """
+    df = df.copy()
+    if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
+        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+
+    # We'll build per-subject scores
+    states = []
+    # for sid, g in df.sort_values(time_col):
+    #     gg = g.copy()
+    df = df.sort_values(time_col)
+
+    # HR evidence (low HR -> sleep). Convert robust z to a [0,1] "sleepiness" via sigmoid.
+    z_hr = _robust_z(df[hr_col])
+    z_hr = np.clip(z_hr, hr_clip_z[0], hr_clip_z[1])
+    # Map: very low z -> near 1, high z -> near 0
+    hr_sleepiness = 1 / (1 + np.exp(1.5 * z_hr))  # 1.5 slope works well; tweak if needed
+
+    # Optional movement evidence (low activity -> sleep)
+    if activity_cols:
+        activity_sleepiness_list = []
+        for c in activity_cols:
+            z_act = _robust_z(gg[c])
+            # low activity => sleep: invert sign
+            activity_sleepiness_list.append(1 / (1 + np.exp(1.5 * z_act)))
+        act_sleepiness = np.nanmean(np.vstack(activity_sleepiness_list), axis=0)
+        # If present, blend HR and activity first (lean on HR)
+        evidence = 0.8 * hr_sleepiness + 0.2 * act_sleepiness
+    else:
+        evidence = hr_sleepiness
+
+    # Time-of-day prior (smooth, not hard). In [0,1].
+    time_prior = _cos_night_prior(df[time_col], night_center_hour, night_width_hours)
+
+    # Final score: weighted combination
+    score = w_hr * evidence + w_time * time_prior
+
+    # Auto-threshold per subject via Otsu-like split on score histogram;
+    # fallback to 0.5 if degenerate.
+    s = score[np.isfinite(score)]
+    if len(s) > 12:
+        hist, bins = np.histogram(s, bins=32, range=(0, 1))
+        p = hist.astype(float) / (hist.sum() + 1e-9)
+        omega = np.cumsum(p)
+        mu = np.cumsum(p * ((bins[:-1] + bins[1:]) / 2))
+        mu_t = mu[-1]
+        sigma_b2 = (mu_t * omega - mu) ** 2 / (omega * (1 - omega) + 1e-12)
+        k = np.nanargmax(sigma_b2)
+        thr = (bins[k] + bins[k + 1]) / 2
+    else:
+        thr = 0.5
+
+    raw_state = np.where(score >= thr, 1, 0)  # 1=sleep, 0=awake
+
+    # Post-process: enforce minimum sleep bout length (in minutes, given per-minute sampling)
+    # Convert short isolated sleep islands to awake
+    arr = raw_state.copy()
+    if min_sleep_bout_minutes and len(arr) > 0:
+        # Find segments of consecutive 1's
+        diff = np.diff(np.r_[0, arr, 0])
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        for st, en in zip(starts, ends):
+            if (en - st) < min_sleep_bout_minutes:
+                arr[st:en] = 0
+
+    df["state"] = np.where(arr == 1, "sleep", "awake")
+    states.append(df)
+
+    out = pd.concat(states, axis=0).sort_index()
+    return out
+
+
+def normalize_by_subject_and_state(
+        df,
+        biomarker_cols=None,
+        time_col="timestamp_israel",
+        hr_col="pulse_rate_bpm",
+        activity_cols=None,
+        **sleep_kwargs,
+):
+    """
+    1) infers 'state' per row (sleep/awake)
+    2) robust-normalizes each biomarker within (subject, state)
+    Returns a new DataFrame with normalized biomarker columns (overwriting the originals)
+    and a 'state' column.
+    """
+    if biomarker_cols is None:
+        biomarker_cols = [
+            "accelerometers_std_g",
+            "activity_counts",
+            "eda_scl_usiemens",
+            "pulse_rate_bpm",
+            "temperature_celsius",
+        ]
+    df = df.copy()
+    df = _label_sleep_awake(
+        df,
+        time_col=time_col,
+        hr_col=hr_col,
+        activity_cols=activity_cols,
+        **sleep_kwargs,
+    )
+
+    # Normalize within (subject, state)
+    def _normalize_group(g):
+        g = g.copy()
+        for c in biomarker_cols:
+            x = pd.to_numeric(g[c], errors="coerce")
+            med = np.nanmedian(x)
+            mad = np.nanmedian(np.abs(x - med))
+            g[c] = (x - med) / (mad + 1e-6)
+        return g
+
+    df = (
+        df.sort_values(time_col)
+        .groupby("state", group_keys=False)
+        .apply(_normalize_group)
+        .reset_index(drop=True)
+    )
+    return df
+
+
+def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', trail_dates_dict=None, normalize=False):
     """
     Build labeled biomarker datasets by (a) aggregating per-patient biomarker streams
     and (b) aligning them to nearby positive-severity tags.
@@ -327,11 +490,340 @@ def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min'):
                 total_number_of_tags += len(tags)
                 total_number_of_tags_per_patient[patient] = len(tags)
                 data = pd.DataFrame()
-                data = create_biomarkers_data_for_patient(data_path, patients_dict, data, patient)
-
+                data = create_biomarkers_data_for_patient(data_path, patients_dict, data, patient, trail_dates_dict)
+                if normalize:
+                    data = normalize_by_subject_and_state(data)
                 filtered_data, other_data = filter_biomarkers_data_around_tags_for_patient(tags, data, time)
                 filtered_around_tags_data = pd.concat([filtered_around_tags_data, filtered_data])
                 remaining_data = pd.concat([remaining_data, other_data])
     print('Total number of tags: ', total_number_of_tags)
     print('Total number of tags per patient: \n', total_number_of_tags_per_patient)
     return filtered_around_tags_data, remaining_data
+
+
+def _flatten_cols(df):
+    df.columns = [
+        "_".join([c for c in map(str, col) if c != "" and c is not None])
+        if isinstance(col, tuple) else str(col)
+        for col in df.columns
+    ]
+    return df
+
+
+import numpy as np
+import pandas as pd
+
+EPS = 1e-6  # for MAD denominator safety
+import numpy as np
+import pandas as pd
+
+EPS = 1e-6  # for MAD denominator safety
+
+
+def _tail_indices_non_na(s: pd.Series, k: int):
+    m = s.notna()
+    if not m.any():
+        return []
+    idx = np.flatnonzero(m.values)
+    return list(idx[-min(k, len(idx)):])
+
+
+def _slope_tail_per_min(s: pd.Series, k: int) -> float:
+    """
+    Linear-fit slope over the last up-to-k non-NaN points (units per minute).
+    Uses true timestamps if the index is datetime-like (handles tz-aware).
+    """
+    tail_pos = _tail_indices_non_na(s, k)
+    if len(tail_pos) < 2:
+        return np.nan
+
+    y = s.iloc[tail_pos].astype(float).values
+    idx = s.index[tail_pos]
+
+    # Build minutes axis
+    if isinstance(idx, pd.DatetimeIndex):
+        # Convert tz-aware -> UTC -> tz-naive to get int64 ns
+        if idx.tz is not None:
+            idx_naive = idx.tz_convert("UTC").tz_localize(None)
+        else:
+            idx_naive = idx
+        t_min = (idx_naive.view("int64") - idx_naive.view("int64")[0]) / 60_000_000_000.0
+    else:
+        # assume 1-min cadence
+        t_min = np.arange(len(y), dtype=float)
+
+    if np.allclose(t_min, t_min[0]):
+        return np.nan
+
+    slope, _ = np.polyfit(t_min, y, 1)
+    return float(slope)
+
+
+def _mad(x: np.ndarray) -> float:
+    if x.size == 0:
+        return np.nan
+    med = np.median(x)
+    return float(np.median(np.abs(x - med)))
+
+
+def _window_features(chunk: pd.DataFrame, value_cols):
+    out = {}
+    for c in value_cols:
+        s = pd.to_numeric(chunk[c], errors="coerce")
+
+        n_valid = int(s.count())
+        n_total = int(s.size)
+        n_na = n_total - n_valid
+
+        out[(c, "count")] = n_valid
+        out[(c, "n_na")] = n_na
+        out[(c, "na_ratio")] = (n_na / n_total) if n_total > 0 else np.nan
+
+        if n_valid == 0:
+            for k in ["mean", "std", "min", "q25", "median", "q75", "max",
+                      "skew", "kurt", "first", "last", "range", "delta", "slope_per_s",
+                      "ema30_end", "dev1_end", "dev5_end", "dev15_end",
+                      "slope5_per_min", "slope15_per_min", "range5", "z15_end"]:
+                out[(c, k)] = np.nan
+            continue
+
+        # basic stats
+        out[(c, "mean")] = s.mean()
+        out[(c, "std")] = s.std(ddof=1) if n_valid >= 2 else np.nan
+        out[(c, "min")] = s.min()
+        out[(c, "q25")] = s.quantile(0.25)
+        out[(c, "median")] = s.median()
+        out[(c, "q75")] = s.quantile(0.75)
+        out[(c, "max")] = s.max()
+
+        # shape stats
+        out[(c, "skew")] = s.skew() if n_valid >= 3 else np.nan
+        out[(c, "kurt")] = s.kurt() if n_valid >= 4 else np.nan
+
+        # edges
+        s_non = s.dropna()
+        first = s_non.iloc[0] if not s_non.empty else np.nan
+        last = s_non.iloc[-1] if not s_non.empty else np.nan
+        out[(c, "first")] = first
+        out[(c, "last")] = last
+        out[(c, "range")] = out[(c, "max")] - out[(c, "min")]
+        out[(c, "delta")] = (last - first) if pd.notna(last) and pd.notna(first) else np.nan
+
+        # ----- FIXED: slope over whole chunk (per second), tz-safe -----
+        m = s.notna().values
+        if m.sum() >= 2:
+            idx = chunk.index
+            if isinstance(idx, pd.DatetimeIndex):
+                # Convert tz-aware -> UTC -> tz-naive
+                if idx.tz is not None:
+                    idx_naive = idx.tz_convert("UTC").tz_localize(None)
+                else:
+                    idx_naive = idx
+                # float seconds since epoch for the valid points
+                t_sec = (idx_naive.view("int64")[m] / 1e9).astype(float)
+            else:
+                # assume 1-min cadence -> seconds grid
+                t_sec = (np.arange(len(idx))[m] * 60.0).astype(float)
+
+            y = s[m].astype(float).values
+            if np.unique(t_sec).size >= 2:
+                slope, _ = np.polyfit(t_sec, y, 1)
+                out[(c, "slope_per_s")] = float(slope)
+            else:
+                out[(c, "slope_per_s")] = np.nan
+        else:
+            out[(c, "slope_per_s")] = np.nan
+
+        # =========== NEW end-of-window sequence features ===========
+        tail5_pos = _tail_indices_non_na(s, 5)
+        tail15_pos = _tail_indices_non_na(s, 15)
+
+        ema30_series = s.ewm(span=30, adjust=False, min_periods=1).mean()
+        ema30_end = float(ema30_series.iloc[-1]) if not ema30_series.empty else np.nan
+        out[(c, "ema30_end")] = ema30_end
+
+        if pd.notna(last):
+            mean5 = float(np.nanmean(s.iloc[tail5_pos].values)) if len(tail5_pos) > 0 else np.nan
+            mean15 = float(np.nanmean(s.iloc[tail15_pos].values)) if len(tail15_pos) > 0 else np.nan
+
+            out[(c, "dev1_end")] = float(last) - ema30_end if pd.notna(ema30_end) else np.nan
+            out[(c, "dev5_end")] = (mean5 - ema30_end) if (pd.notna(mean5) and pd.notna(ema30_end)) else np.nan
+            out[(c, "dev15_end")] = (mean15 - ema30_end) if (pd.notna(mean15) and pd.notna(ema30_end)) else np.nan
+        else:
+            out[(c, "dev1_end")] = out[(c, "dev5_end")] = out[(c, "dev15_end")] = np.nan
+
+        out[(c, "slope5_per_min")] = _slope_tail_per_min(s, 5)
+        out[(c, "slope15_per_min")] = _slope_tail_per_min(s, 15)
+
+        if len(tail5_pos) > 0:
+            tail5_vals = s.iloc[tail5_pos].values.astype(float)
+            out[(c, "range5")] = float(np.nanmax(tail5_vals) - np.nanmin(tail5_vals))
+        else:
+            out[(c, "range5")] = np.nan
+
+        if len(tail15_pos) > 0 and pd.notna(last):
+            tail15_vals = s.iloc[tail15_pos].values.astype(float)
+            med15 = float(np.nanmedian(tail15_vals))
+            mad15 = _mad(tail15_vals)
+            out[(c, "z15_end")] = (float(last) - med15) / (mad15 + EPS) if (
+                    pd.notna(med15) and pd.notna(mad15)) else np.nan
+        else:
+            out[(c, "z15_end")] = np.nan
+        # ===========================================================
+
+    return out
+
+
+def make_time_windows(df, ts_col, window_minutes, step_minutes=None, value_cols=None, group_col=None, label_func=None):
+    assert ts_col in df.columns, f"{ts_col=} not in df"
+    tmp = df.copy()
+    tmp[ts_col] = pd.to_datetime(tmp[ts_col])
+    tmp = tmp.sort_values([group_col, ts_col] if group_col else ts_col)
+    tmp = tmp.set_index(ts_col)
+
+    # choose value columns
+    if value_cols is None:
+        value_cols = tmp.select_dtypes(include=[np.number, "float", "int", "Int64"]).columns.tolist()
+        if group_col and group_col in value_cols:
+            value_cols.remove(group_col)
+        value_cols.remove('timestamp_unix')
+        value_cols.remove('severity')
+
+    window = pd.Timedelta(minutes=window_minutes)
+    step = pd.Timedelta(minutes=step_minutes) if step_minutes is not None else window
+
+    # generate window starts
+    start = tmp.index.min().ceil(step)  # start aligned forward to step grid
+    end = tmp.index.max()
+    if pd.isna(start) or pd.isna(end):
+        return pd.DataFrame()
+
+    starts = pd.date_range(start=start, end=end, freq=step)
+    rows = []
+    labels = []
+
+    for s0 in starts:
+        s1 = s0 + window
+        chunk = tmp.loc[(tmp.index >= s0) & (tmp.index < s1)]
+        if chunk.empty:
+            continue
+        feats = _window_features(chunk, value_cols)
+        # metadata
+        feats[("timestamp_israel")] = s0
+        # feats[("meta", "start")] = s0
+        # feats[("meta", "end")] = s1
+        # feats[("meta", "n_rows")] = len(chunk)
+        rows.append(feats)
+        if label_func is not None:
+            labels.append(label_func(chunk))
+
+    if not rows:
+        return pd.DataFrame()
+
+    X = pd.DataFrame(rows)
+    X = _flatten_cols(X)
+    if label_func is not None:
+        y = pd.Series(labels, name="label").reset_index(drop=True)
+        X = pd.concat([X, y], axis=1)
+
+    # split X / y if label exists
+    if "label" in X.columns:
+        y = X.pop("label")
+        return X, y
+    return X, None
+
+
+def create_chunked_data(data, patients_dict, window_minutes=5, step_minutes=3):
+    res = pd.DataFrame()
+    data = data.drop(columns=['missing_value_reason'])
+    for patient in patients_dict.keys():
+        patient_data = data[data['participant_full_id'].str.contains(patient, na=False)]
+        patient = patient_data['participant_full_id'].unique()
+        patient_data, _ = make_time_windows(df=patient_data, ts_col='timestamp_israel',
+                                            window_minutes=window_minutes, step_minutes=step_minutes)
+        patient_data['participant_full_id'] = patient[0]
+        res = pd.concat([res, patient_data])
+    return res
+
+
+if __name__ == '__main__':
+    patients_dict = {
+        'TRAIL001': 'TRAIL001-3YK3L151K2',
+        'TRAIL002': 'TRAIL002-3YK3J1514F',
+        'TRAIL003': 'TRAIL003-3YK3K153QJ',
+        'TRAIL004': 'TRAIL004-3YK3J151CV',
+        'TRAIL005': 'TRAIL005-3YK3L151DR'}
+    eval_patients_dict = {
+        'TRAIL008': 'TRAIL008-3YK3J1514F',
+        'TRAIL009': 'TRAIL009-3YKC51P1YL'
+    }
+    time = '15min'
+
+    window_minutes_list = [5, 7, 10, 15]
+    step_minutes_list = [1, 3]
+
+    window_minutes_list = [15]
+    step_minutes_list = [1]
+    #
+    # for window_minutes in window_minutes_list:
+    #     for step_minutes in step_minutes_list:
+    #         tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
+    #         data_path = r'C:\Users\GONY\Desktop\Booggii\data'
+    #         chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\{window_minutes}min_{step_minutes}step'
+    #
+    #         os.makedirs(chunked_data_path, exist_ok=True)
+    #         print('creating data')
+    #         positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time)
+    #         negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
+    #                                             step_minutes=step_minutes)
+    #         positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
+    #                                             step_minutes=step_minutes)
+    #         positive_data.to_pickle(
+    #             chunked_data_path + rf'\train_eval_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+    #         negative_data.to_pickle(
+    #             chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+    #
+    #         eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
+    #                                                                          time)
+    #         eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
+    #                                                  window_minutes=window_minutes,
+    #                                                  step_minutes=step_minutes)
+    #         eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
+    #                                                  window_minutes=window_minutes,
+    #                                                  step_minutes=step_minutes)
+    #         eval_positive_data.to_pickle(
+    #             chunked_data_path + rf'\test_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+    #         eval_negative_data.to_pickle(
+    #             chunked_data_path + rf'\test_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+
+    for window_minutes in window_minutes_list:
+        for step_minutes in step_minutes_list:
+            tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
+            data_path = r'C:\Users\GONY\Desktop\Booggii\data'
+            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\{window_minutes}min_{step_minutes}step_normalized_'
+
+            os.makedirs(chunked_data_path, exist_ok=True)
+            print('creating data')
+            positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
+                                                                   normalize=True)
+            negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
+                                                step_minutes=step_minutes)
+            positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
+                                                step_minutes=step_minutes)
+            positive_data.to_pickle(
+                chunked_data_path + rf'\train_eval_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+            negative_data.to_pickle(
+                chunked_data_path + rf'\train_eval_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+
+            eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
+                                                                             time, normalize=True)
+            eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
+                                                     window_minutes=window_minutes,
+                                                     step_minutes=step_minutes)
+            eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
+                                                     window_minutes=window_minutes,
+                                                     step_minutes=step_minutes)
+            eval_positive_data.to_pickle(
+                chunked_data_path + rf'\test_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+            eval_negative_data.to_pickle(
+                chunked_data_path + rf'\test_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
