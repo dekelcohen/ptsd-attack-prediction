@@ -1,0 +1,17 @@
+﻿severity,timestamp,location,activity,patientId,deviceId,eventType,origin
+-1,2025-08-28 17:25:39 IDT,,other,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,other,remote
+-1,2025-08-28 16:52:13 IDT,,other,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,other,remote
+-1,2025-08-27 10:21:59 IDT,,other,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,other,remote
+3,2025-08-25 23:10:33 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,anxiety,remote
+4,2025-08-25 22:11:10 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,anxiety,app
+2,2025-08-25 11:29:05 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,anxiety,remote
+3,2025-08-24 17:51:16 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,anger,remote
+-1,2025-08-20 22:42:09 IDT,,other,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,other,remote
+4,2025-08-14 13:30:10 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,anger,app
+3,2025-08-12 22:19:12 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,anxiety,remote
+3,2025-08-12 12:06:25 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,anxiety,app
+2,2025-08-07 06:05:32 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,anxiety,remote
+-1,2025-08-05 21:06:58 IDT,,other,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,other,remote
+3,2025-08-05 12:52:03 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,anxiety,app
+3,2025-08-04 19:04:48 IDT,,rest,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,other,app
+-1,2025-08-03 11:11:27 IDT,,other,5fa81c03-bff3-4d72-9a66-01a95003937e,d056ff80-1f6c-40dc-b11f-8efd8dfeec87,other,remote
