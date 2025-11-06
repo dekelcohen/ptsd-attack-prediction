@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict, deque
 from pathlib import Path
 from datetime import datetime
 
@@ -270,7 +271,7 @@ def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
 
     # Remove duplicate timestamps, keeping the last occurrence
     tags_by_time = tags_by_time[~tags_by_time.index.duplicated(keep='last')]
-    tags_by_time = tags_by_time.sort_index(kind='mergesort')  # ✅ critical for 'nearest'
+    tags_by_time = tags_by_time.sort_index(kind='mergesort')
 
     # Find nearest events for both columns
     nearest_events = tags_by_time.reindex(
@@ -278,19 +279,70 @@ def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
         method='nearest',
         tolerance=pd.Timedelta(time)
     )
+    # 1) sample k per tag
+    rng = np.random.default_rng()
+    tag_index = pd.DatetimeIndex(tags_by_time.index)
+    # ks = rng.choice([15, 30, 40], size=len(tag_index))
+    ks = rng.choice([15], size=len(tag_index))
 
-    # Copy data and add both eventType and severity columns
-    data_with_event = data.copy()
-    data_with_event['eventType'] = nearest_events['eventType'].values
-    data_with_event['severity'] = nearest_events['severity'].values
 
-    # rows WITH matching tag (where eventType is not null)
-    df_selected = data_with_event[data_with_event['eventType'].notna()]
+    # 2) build windows  [start = tag - k,  end = tag + 10]
+    meta = tags_by_time.reindex(tag_index)[["eventType", "severity"]]
+    windows = pd.DataFrame({
+        "tag_time": tag_index,
+        "k": ks,
+        "start": tag_index - pd.to_timedelta(ks, unit="m"),
+        "end": tag_index + pd.Timedelta(minutes=10),
+        "eventType": meta["eventType"].to_numpy(),
+        "severity": meta["severity"].to_numpy(),
+    }).sort_values("start")
 
-    # rows WITHOUT matching tag (where eventType is null)
-    df_remaining = data_with_event[data_with_event['eventType'].isna()]
+    # 3) merge_asof to assign each data row the most recent window start (if any)
+    data_sorted = data.assign(__rowid=np.arange(len(data))).sort_values("timestamp_israel")
+    merged = pd.merge_asof(
+        data_sorted,
+        windows,
+        left_on="timestamp_israel",
+        right_on="start",
+        direction="backward",
+        allow_exact_matches=True,
+    )
 
-    return df_selected, df_remaining
+    # 4) keep rows that fall inside the matched window (union of all windows)
+    in_window = merged["timestamp_israel"] <= merged["end"]
+
+    selected_rows = merged.loc[in_window, [
+        "__rowid", "tag_time", "k", "start", "end", "eventType", "severity"
+    ]]
+
+    # Build 'selected' by iloc with row positions so ordering & alignment match
+    rowpos = selected_rows["__rowid"].to_numpy()
+    selected = data.iloc[rowpos].copy()
+
+    # Attach the window metadata (same order as rowpos)
+    # selected["tag_time"] = selected_rows["tag_time"].to_numpy()
+    # selected["k"] = selected_rows["k"].to_numpy()
+    # selected["window_start"] = selected_rows["start"].to_numpy()
+    # selected["window_end"] = selected_rows["end"].to_numpy()
+    selected["eventType"] = selected_rows["eventType"].to_numpy()
+    selected["severity"] = selected_rows["severity"].to_numpy()
+
+    # 'remaining' = everything not selected (preserves original order)
+    mask = np.zeros(len(data), dtype=bool)
+    mask[rowpos] = True
+    remaining = data.iloc[~mask].copy()
+    # # Copy data and add both eventType and severity columns
+    # data_with_event = data.copy()
+    # data_with_event = windowed.copy()
+    # # data_with_event['eventType'] = nearest_events['eventType'].values
+    # # data_with_event['severity'] = nearest_events['severity'].values
+    #
+    # # rows WITH matching tag (where eventType is not null)
+    # df_selected = data_with_event[data_with_event['eventType'].notna()]
+    #
+    # # rows WITHOUT matching tag (where eventType is null)
+    # df_remaining = data_with_event[data_with_event['eventType'].isna()]
+    return selected, remaining
 
 
 def _robust_z(x):
@@ -513,12 +565,9 @@ def _flatten_cols(df):
 import numpy as np
 import pandas as pd
 
-EPS = 1e-6  # for MAD denominator safety
-import numpy as np
-import pandas as pd
 
+# ------------------------ helpers ------------------------
 EPS = 1e-6  # for MAD denominator safety
-
 
 def _tail_indices_non_na(s: pd.Series, k: int):
     m = s.notna()
@@ -566,6 +615,43 @@ def _mad(x: np.ndarray) -> float:
     return float(np.median(np.abs(x - med)))
 
 
+def _tod_slot(ts: pd.Timestamp, tz: str | None, slot_minutes: int) -> int:
+    """
+    Map timestamp to a time-of-day slot index 0..(1440/slot_minutes - 1) in the given timezone.
+    """
+    if tz is not None:
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(tz)
+        else:
+            ts = ts.tz_convert(tz)
+    minutes = ts.hour * 60 + ts.minute
+    return int(minutes // slot_minutes)
+
+
+def _local_date(ts: pd.Timestamp, tz: str | None) -> pd.Timestamp.date:
+    """
+    Get the local calendar date for ts in tz.
+    """
+    if tz is not None:
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(tz)
+        else:
+            ts = ts.tz_convert(tz)
+    return ts.date()
+
+
+def _safe_mean(arr_like) -> float:
+    a = np.asarray(arr_like, dtype=float)
+    return float(np.nanmean(a)) if a.size else np.nan
+
+
+def _safe_std(arr_like) -> float:
+    a = np.asarray(arr_like, dtype=float)
+    return float(np.nanstd(a, ddof=1)) if a.size >= 2 else np.nan
+
+
+# --------------------- window features ---------------------
+
 def _window_features(chunk: pd.DataFrame, value_cols):
     out = {}
     for c in value_cols:
@@ -575,9 +661,9 @@ def _window_features(chunk: pd.DataFrame, value_cols):
         n_total = int(s.size)
         n_na = n_total - n_valid
 
-        out[(c, "count")] = n_valid
-        out[(c, "n_na")] = n_na
-        out[(c, "na_ratio")] = (n_na / n_total) if n_total > 0 else np.nan
+        # out[(c, "count")] = n_valid
+        # out[(c, "n_na")] = n_na
+        # out[(c, "na_ratio")] = (n_na / n_total) if n_total > 0 else np.nan
 
         if n_valid == 0:
             for k in ["mean", "std", "min", "q25", "median", "q75", "max",
@@ -609,7 +695,7 @@ def _window_features(chunk: pd.DataFrame, value_cols):
         out[(c, "range")] = out[(c, "max")] - out[(c, "min")]
         out[(c, "delta")] = (last - first) if pd.notna(last) and pd.notna(first) else np.nan
 
-        # ----- FIXED: slope over whole chunk (per second), tz-safe -----
+        # ----- slope over whole chunk (per second), tz-safe -----
         m = s.notna().values
         if m.sum() >= 2:
             idx = chunk.index
@@ -634,7 +720,7 @@ def _window_features(chunk: pd.DataFrame, value_cols):
         else:
             out[(c, "slope_per_s")] = np.nan
 
-        # =========== NEW end-of-window sequence features ===========
+        # =========== end-of-window sequence features ===========
         tail5_pos = _tail_indices_non_na(s, 5)
         tail15_pos = _tail_indices_non_na(s, 15)
 
@@ -669,12 +755,30 @@ def _window_features(chunk: pd.DataFrame, value_cols):
                     pd.notna(med15) and pd.notna(mad15)) else np.nan
         else:
             out[(c, "z15_end")] = np.nan
-        # ===========================================================
+        # =======================================================
 
     return out
 
 
-def make_time_windows(df, ts_col, window_minutes, step_minutes=None, value_cols=None, group_col=None, label_func=None):
+# --------------------- windowing driver ---------------------
+
+def make_time_windows(
+    df,
+    ts_col,
+    window_minutes,
+    step_minutes=None,
+    value_cols=None,
+    group_col=None,
+    label_func=None,
+    # --- NEW: time-of-day features params (all optional) ---
+    enable_tod: bool = True,
+    tod_slot_minutes: int = 15,
+    tz_for_tod: str | None = "Asia/Jerusalem",
+    tod_min_history: int = 5,
+    tod_history_len: int = 56,        # ~8 weeks of daily coverage
+    keep_same_yday: bool = True,
+    keep_same_wk: bool = True,
+):
     assert ts_col in df.columns, f"{ts_col=} not in df"
     tmp = df.copy()
     tmp[ts_col] = pd.to_datetime(tmp[ts_col])
@@ -686,8 +790,10 @@ def make_time_windows(df, ts_col, window_minutes, step_minutes=None, value_cols=
         value_cols = tmp.select_dtypes(include=[np.number, "float", "int", "Int64"]).columns.tolist()
         if group_col and group_col in value_cols:
             value_cols.remove(group_col)
-        value_cols.remove('timestamp_unix')
-        value_cols.remove('severity')
+        # defensive: drop if present
+        for col_to_drop in ['timestamp_unix', 'severity']:
+            if col_to_drop in value_cols:
+                value_cols.remove(col_to_drop)
 
     window = pd.Timedelta(minutes=window_minutes)
     step = pd.Timedelta(minutes=step_minutes) if step_minutes is not None else window
@@ -699,6 +805,14 @@ def make_time_windows(df, ts_col, window_minutes, step_minutes=None, value_cols=
         return pd.DataFrame()
 
     starts = pd.date_range(start=start, end=end, freq=step)
+
+    # --- NEW: state for time-of-day rolling baselines (past-only) ---
+    if enable_tod:
+        # hist[col][slot] -> deque of past window means for that slot
+        slot_hist = defaultdict(lambda: defaultdict(lambda: deque(maxlen=tod_history_len)))
+        # same-time references by calendar date: slot_by_date[col][slot][date] = mean
+        slot_by_date = defaultdict(lambda: defaultdict(dict))
+
     rows = []
     labels = []
 
@@ -707,12 +821,62 @@ def make_time_windows(df, ts_col, window_minutes, step_minutes=None, value_cols=
         chunk = tmp.loc[(tmp.index >= s0) & (tmp.index < s1)]
         if chunk.empty:
             continue
+
         feats = _window_features(chunk, value_cols)
+
+        # -------------- NEW: time-of-day features ---------------
+        if enable_tod:
+            slot = _tod_slot(s0, tz_for_tod, tod_slot_minutes)
+            current_date = _local_date(s0, tz_for_tod)
+
+            for c in value_cols:
+                cur_val = feats.get((c, "mean"), np.nan)
+
+                # rolling baseline from prior days at the same slot (no leakage)
+                hist_vals = slot_hist[c][slot]
+                if len(hist_vals) >= tod_min_history:
+                    base_mean = _safe_mean(hist_vals)
+                    base_std = _safe_std(hist_vals)
+                    feats[(c, f"tod{tod_slot_minutes}_base_mean")] = base_mean
+                    feats[(c, f"tod{tod_slot_minutes}_base_std")] = base_std
+                    feats[(c, f"tod{tod_slot_minutes}_delta")] = (
+                        float(cur_val) - base_mean
+                    ) if pd.notna(cur_val) and pd.notna(base_mean) else np.nan
+                    feats[(c, f"tod{tod_slot_minutes}_z")] = (
+                        (float(cur_val) - base_mean) / (base_std + EPS)
+                    ) if (pd.notna(cur_val) and pd.notna(base_mean) and pd.notna(base_std)) else np.nan
+                else:
+                    feats[(c, f"tod{tod_slot_minutes}_base_mean")] = np.nan
+                    feats[(c, f"tod{tod_slot_minutes}_base_std")] = np.nan
+                    feats[(c, f"tod{tod_slot_minutes}_delta")] = np.nan
+                    feats[(c, f"tod{tod_slot_minutes}_z")] = np.nan
+
+                # same-time yesterday / last week comparisons (if available)
+                if keep_same_yday:
+                    prev_day = (pd.Timestamp(current_date) - pd.Timedelta(days=1)).date()
+                    val_yday = slot_by_date[c][slot].get(prev_day, np.nan)
+                    feats[(c, "delta_vs_yesterday")] = (
+                        float(cur_val) - float(val_yday)
+                    ) if pd.notna(cur_val) and pd.notna(val_yday) else 0 ### if no previous data then assuming it's the same as today
+
+                if keep_same_wk:
+                    prev_week = (pd.Timestamp(current_date) - pd.Timedelta(days=7)).date()
+                    val_wk = slot_by_date[c][slot].get(prev_week, np.nan)
+                    feats[(c, "delta_vs_lastweek")] = (
+                        float(cur_val) - float(val_wk)
+                    ) if pd.notna(cur_val) and pd.notna(val_wk) else 0 ### if no previous data then assuming it's the same as today
+
+            # After computing features, update histories with *current* values for future windows
+            for c in value_cols:
+                cur_val = feats.get((c, "mean"), np.nan)
+                if pd.notna(cur_val):
+                    slot_hist[c][slot].append(float(cur_val))
+                    slot_by_date[c][slot][current_date] = float(cur_val)
+        # ---------------------------------------------------------
+
         # metadata
         feats[("timestamp_israel")] = s0
-        # feats[("meta", "start")] = s0
-        # feats[("meta", "end")] = s1
-        # feats[("meta", "n_rows")] = len(chunk)
+
         rows.append(feats)
         if label_func is not None:
             labels.append(label_func(chunk))
@@ -721,7 +885,7 @@ def make_time_windows(df, ts_col, window_minutes, step_minutes=None, value_cols=
         return pd.DataFrame()
 
     X = pd.DataFrame(rows)
-    X = _flatten_cols(X)
+    X = _flatten_cols(X)  # assumed to exist in your codebase
     if label_func is not None:
         y = pd.Series(labels, name="label").reset_index(drop=True)
         X = pd.concat([X, y], axis=1)
@@ -733,97 +897,201 @@ def make_time_windows(df, ts_col, window_minutes, step_minutes=None, value_cols=
     return X, None
 
 
-def create_chunked_data(data, patients_dict, window_minutes=5, step_minutes=3):
+# --------------------- dataset chunker ---------------------
+
+def create_chunked_data(data, patients_dict, window_minutes=5, step_minutes=3, enable_tod=False, **mw_kwargs):
+    """
+    Pass time-of-day feature controls via **mw_kwargs if you want:
+        enable_tod=True/False,
+        tod_slot_minutes=15,
+        tz_for_tod="Asia/Jerusalem",
+        tod_min_history=5,
+        tod_history_len=56,
+        keep_same_yday=True,
+        keep_same_wk=True
+    """
     res = pd.DataFrame()
-    data = data.drop(columns=['missing_value_reason'])
+    if 'missing_value_reason' in data.columns:
+        data = data.drop(columns=['missing_value_reason'])
     for patient in patients_dict.keys():
+        print('working on patient ', patient)
+        if patient=='TRAIL010':
+            data['participant_full_id'] = data['participant_full_id'].str.replace('TRAIL10', 'TRAIL010', regex=False)
+        if patient=='TRAIL011':
+            data['participant_full_id'] = data['participant_full_id'].str.replace('TRAIL11', 'TRAIL011', regex=False)
+
         patient_data = data[data['participant_full_id'].str.contains(patient, na=False)]
         patient = patient_data['participant_full_id'].unique()
-        patient_data, _ = make_time_windows(df=patient_data, ts_col='timestamp_israel',
-                                            window_minutes=window_minutes, step_minutes=step_minutes)
-        patient_data['participant_full_id'] = patient[0]
-        res = pd.concat([res, patient_data])
+        try:
+            patient_data, _ = make_time_windows(
+                df=patient_data,
+                ts_col='timestamp_israel',
+                window_minutes=window_minutes,
+                step_minutes=step_minutes,
+                enable_tod=enable_tod,
+                **mw_kwargs
+            )
+            patient_data['participant_full_id'] = patient[0]
+            res = pd.concat([res, patient_data], ignore_index=True)
+        except Exception as e:
+            print(e)
+            continue
     return res
 
 
 if __name__ == '__main__':
     patients_dict = {
-        'TRAIL001': 'TRAIL001-3YK3L151K2',
-        'TRAIL002': 'TRAIL002-3YK3J1514F',
-        'TRAIL003': 'TRAIL003-3YK3K153QJ',
-        'TRAIL004': 'TRAIL004-3YK3J151CV',
-        'TRAIL005': 'TRAIL005-3YK3L151DR'}
-    eval_patients_dict = {
-        'TRAIL008': 'TRAIL008-3YK3J1514F',
-        'TRAIL009': 'TRAIL009-3YKC51P1YL'
+        # 'TRAIL001': 'TRAIL001-3YK3L151K2',
+        # 'TRAIL002': 'TRAIL002-3YK3J1514F',
+        # 'TRAIL003': 'TRAIL003-3YK3K153QJ',
+        # 'TRAIL004': 'TRAIL004-3YK3J151CV',
+        # 'TRAIL005': 'TRAIL005-3YK3L151DR',
+        # 'TRAIL008': 'TRAIL008-3YK3J1514F',
+        # 'TRAIL009': 'TRAIL009-3YKC51P1YL',
+        # 'TRAIL010': 'TRAIL10-3YKC51P2H3',
+        'TRAIL011': 'TRAIL011-3YK3L151DR',
+        # 'TRAIL012': 'TRAIL012-3YK3L151K2',
+        # 'TRAIL013': 'TRAIL013-3YK3J1514F',
     }
+
+    trail_dates = {
+        'TRAIL003': {'start_date': '30.3.2025 16:04', 'end_date': '29.4.2025 17:40'},
+        'TRAIL002': {'start_date': '9.4.2025 14:28', 'end_date': '8.5.2025 19:30'},
+        'TRAIL001': {'start_date': '24.4.2025 11:40', 'end_date': '23.5.2025 10:21'},
+        'TRAIL004': {'start_date': '27.4.2025 15:00', 'end_date': '26.5.2025 14:25'},
+        'TRAIL005': {'start_date': '14.5.2025 11:56', 'end_date': '17.6.2025 00:00'},
+        'TRAIL008': {'start_date': '10.7.2025 14:50', 'end_date': '10.8.2025 00:00'},
+        'TRAIL009': {'start_date': '31.7.2025 13:15', 'end_date': '29.8.2025 10:00'},
+        'TRAIL010': {'start_date': '3.8.2025 10:48', 'end_date': '1.9.2025 12:00'},
+        'TRAIL011': {'start_date': '14.8.2025 14:00', 'end_date': '21.9.2025 13:00'},
+        'TRAIL012': {'start_date': '28.8.2025 14:00', 'end_date': '25.9.2025 10:00'},
+        'TRAIL013': {'start_date': '31.8.2025 12:00', 'end_date': '25.9.2025 12:00'},
+    }
+    fmt = "%d.%m.%Y %H:%M"
+    trail_dates_ts = {
+        k: {
+            'start_date': datetime.strptime(v['start_date'], fmt),
+            'end_date': datetime.strptime(v['end_date'], fmt),
+        }
+        for k, v in trail_dates.items()
+    }
+
     time = '15min'
 
     window_minutes_list = [5, 7, 10, 15]
     step_minutes_list = [1, 3]
 
-    window_minutes_list = [15]
-    step_minutes_list = [1]
+    window_minutes_list = [10]
+    step_minutes_list = [3]
     #
-    # for window_minutes in window_minutes_list:
-    #     for step_minutes in step_minutes_list:
-    #         tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
-    #         data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-    #         chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\{window_minutes}min_{step_minutes}step'
-    #
-    #         os.makedirs(chunked_data_path, exist_ok=True)
-    #         print('creating data')
-    #         positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time)
-    #         negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
-    #                                             step_minutes=step_minutes)
-    #         positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
-    #                                             step_minutes=step_minutes)
-    #         positive_data.to_pickle(
-    #             chunked_data_path + rf'\train_eval_positive_data_{window_minutes}min_{step_minutes}step.pkl')
-    #         negative_data.to_pickle(
-    #             chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
-    #
-    #         eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
-    #                                                                          time)
-    #         eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
-    #                                                  window_minutes=window_minutes,
-    #                                                  step_minutes=step_minutes)
-    #         eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
-    #                                                  window_minutes=window_minutes,
-    #                                                  step_minutes=step_minutes)
-    #         eval_positive_data.to_pickle(
-    #             chunked_data_path + rf'\test_positive_data_{window_minutes}min_{step_minutes}step.pkl')
-    #         eval_negative_data.to_pickle(
-    #             chunked_data_path + rf'\test_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+    for window_minutes in window_minutes_list:
+        for step_minutes in step_minutes_list:
+            tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
+            data_path = r'C:\Users\GONY\Desktop\Booggii\data'
+            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_{window_minutes}min_{step_minutes}step'
+
+            os.makedirs(chunked_data_path, exist_ok=True)
+            print('creating data')
+            positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time, trail_dates_dict=trail_dates_ts)
+            negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
+                                                step_minutes=step_minutes, enable_tod=False)
+            positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
+                                                step_minutes=step_minutes, enable_tod=False)
+            positive_data.to_pickle(
+                chunked_data_path + rf'\train_eval_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+            negative_data.to_pickle(
+                chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+
+            # eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
+            #                                                                  time)
+            # eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
+            #                                          window_minutes=window_minutes,
+            #                                          step_minutes=step_minutes)
+            # eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
+            #                                          window_minutes=window_minutes,
+            #                                          step_minutes=step_minutes)
+            # eval_positive_data.to_pickle(
+            #     chunked_data_path + rf'\test_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+            # eval_negative_data.to_pickle(
+            #     chunked_data_path + rf'\test_negative_data_{window_minutes}min_{step_minutes}step.pkl')
 
     for window_minutes in window_minutes_list:
         for step_minutes in step_minutes_list:
             tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
             data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\{window_minutes}min_{step_minutes}step_normalized_'
+            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_{window_minutes}min_{step_minutes}step_normalized_'
 
             os.makedirs(chunked_data_path, exist_ok=True)
             print('creating data')
             positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
-                                                                   normalize=True)
+                                                                   normalize=True, trail_dates_dict=trail_dates_ts)
             negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
-                                                step_minutes=step_minutes)
+                                                step_minutes=step_minutes, enable_tod=False)
             positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
-                                                step_minutes=step_minutes)
+                                                step_minutes=step_minutes, enable_tod=False)
             positive_data.to_pickle(
                 chunked_data_path + rf'\train_eval_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
             negative_data.to_pickle(
                 chunked_data_path + rf'\train_eval_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+            #
+            # eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
+            #                                                                  time, normalize=True)
+            # eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
+            #                                          window_minutes=window_minutes,
+            #                                          step_minutes=step_minutes)
+            # eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
+            #                                          window_minutes=window_minutes,
+            #                                          step_minutes=step_minutes)
+            # eval_positive_data.to_pickle(
+            #     chunked_data_path + rf'\test_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+            # eval_negative_data.to_pickle(
+            #     chunked_data_path + rf'\test_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+    for window_minutes in window_minutes_list:
+        for step_minutes in step_minutes_list:
+            tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
+            data_path = r'C:\Users\GONY\Desktop\Booggii\data'
+            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_tod_features{window_minutes}min_{step_minutes}step'
 
-            eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
-                                                                             time, normalize=True)
-            eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
-                                                     window_minutes=window_minutes,
-                                                     step_minutes=step_minutes)
-            eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
-                                                     window_minutes=window_minutes,
-                                                     step_minutes=step_minutes)
-            eval_positive_data.to_pickle(
-                chunked_data_path + rf'\test_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
-            eval_negative_data.to_pickle(
-                chunked_data_path + rf'\test_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+            os.makedirs(chunked_data_path, exist_ok=True)
+            print('creating data')
+            positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time, trail_dates_dict=trail_dates_ts)
+            negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
+                                                step_minutes=step_minutes, enable_tod=True)
+            positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
+                                                step_minutes=step_minutes, enable_tod=True)
+            positive_data.to_pickle(
+                chunked_data_path + rf'\train_eval_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+            negative_data.to_pickle(
+                chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+
+            # eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
+            #                                                                  time)
+            # eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
+            #                                          window_minutes=window_minutes,
+            #                                          step_minutes=step_minutes)
+            # eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
+            #                                          window_minutes=window_minutes,
+            #                                          step_minutes=step_minutes)
+            # eval_positive_data.to_pickle(
+            #     chunked_data_path + rf'\test_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+            # eval_negative_data.to_pickle(
+            #     chunked_data_path + rf'\test_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+
+    for window_minutes in window_minutes_list:
+        for step_minutes in step_minutes_list:
+            tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
+            data_path = r'C:\Users\GONY\Desktop\Booggii\data'
+            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_tod_features{window_minutes}min_{step_minutes}step_normalized_'
+
+            os.makedirs(chunked_data_path, exist_ok=True)
+            print('creating data')
+            positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
+                                                                   normalize=True, trail_dates_dict=trail_dates_ts)
+            negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
+                                                step_minutes=step_minutes, enable_tod=True)
+            positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
+                                                step_minutes=step_minutes, enable_tod=True)
+            positive_data.to_pickle(
+                chunked_data_path + rf'\train_eval_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+            negative_data.to_pickle(
+                chunked_data_path + rf'\train_eval_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
