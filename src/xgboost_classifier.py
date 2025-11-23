@@ -104,7 +104,7 @@ class xgboost_model():
         print(report)
 
         self.gen_confusion_matrix(new_predictions, self.y_val)
-        self.plot_important_features()
+        # self.plot_important_features()
         self.eval_on_test()
 
         print(self.output_dir)
@@ -221,7 +221,7 @@ def split_train_test_by_day(X):
 
     # Split based on days
     train_days, val_days = train_test_split(
-        unique_days, test_size=0.25, random_state=42
+        unique_days, test_size=0.25, random_state=40
     )
 
     # Create masks for samples belonging to the selected days
@@ -346,7 +346,7 @@ if __name__ == '__main__':
         'TRAIL008': 'TRAIL008-3YK3J1514F',
         'TRAIL009': 'TRAIL009-3YKC51P1YL',
         'TRAIL010': 'TRAIL10-3YKC51P2H3',
-        'TRAIL011': 'TRAIL012-3YK3L151K2',
+        'TRAIL011': 'TRAIL011-3YK3L151DR',
         'TRAIL012': 'TRAIL012-3YK3L151K2',
         'TRAIL013': 'TRAIL013-3YK3J1514F',
     }
@@ -374,37 +374,43 @@ if __name__ == '__main__':
     }
 
     time = '15min'
-    window_minutes = 60*3
-    step_minutes = 60*3
+    window_minutes = 60 * 3
+    step_minutes = 60 * 3
     normalize = False
     standard_scaling = False
     multiclassification = False
 
     tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
     data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-    chunked_data_path = fr"C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_{window_minutes}min_{step_minutes}step{'_normalized_' if normalize else ''}"
+    chunked_data_path = fr"C:\Users\GONY\Desktop\Booggii\processed_data\old_classification_tod_features{window_minutes}min_{step_minutes}step{'_normalized_' if normalize else ''}"
 
     if os.path.exists(chunked_data_path):
         # if False:
         print('loading existing pickle files:')
         positive_data = pd.read_pickle(
-            chunked_data_path + rf"\train_eval_positive_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
+            chunked_data_path + rf"\positive_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
         negative_data = pd.read_pickle(
-            chunked_data_path + rf"\train_eval_negative_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
+            chunked_data_path + rf"\negative_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
     else:
         os.makedirs(chunked_data_path, exist_ok=True)
         print('creating data')
 
         positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
                                                                trail_dates_ts)
-        negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
-                                            step_minutes=step_minutes)
-        positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
-                                            step_minutes=step_minutes)
+        positive_data['classification'] = 1
+        negative_data['classification'] = 0
+        data = pd.concat([positive_data, negative_data])
+        data = data.sort_values(by='timestamp_israel')
+        data = create_chunked_data(data, patients_dict, window_minutes=window_minutes,
+                                            step_minutes=step_minutes, enable_tod=True)
+        positive_data = data[data['classification']==1]
+        negative_data = data[data['classification'] == 0]
+        # positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
+        #                                     step_minutes=step_minutes, enable_tod=True)
         positive_data.to_pickle(
-            chunked_data_path + rf'\train_eval_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+            chunked_data_path + rf'\positive_data_{window_minutes}min_{step_minutes}step.pkl')
         negative_data.to_pickle(
-            chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+            chunked_data_path + rf'\negative_data_{window_minutes}min_{step_minutes}step.pkl')
 
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d_%H-%M")

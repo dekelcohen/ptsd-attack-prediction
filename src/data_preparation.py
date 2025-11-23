@@ -802,7 +802,7 @@ def make_time_windows(
         if group_col and group_col in value_cols:
             value_cols.remove(group_col)
         # defensive: drop if present
-        for col_to_drop in ['timestamp_unix', 'severity']:
+        for col_to_drop in ['timestamp_unix', 'severity', 'classification']:
             if col_to_drop in value_cols:
                 value_cols.remove(col_to_drop)
 
@@ -832,7 +832,8 @@ def make_time_windows(
         chunk = tmp.loc[(tmp.index >= s0) & (tmp.index < s1)]
         if chunk.empty:
             continue
-
+        classification = max(chunk['classification'])
+        chunk = chunk.drop(columns=['classification'])
         feats = _window_features(chunk, value_cols)
 
         # -------------- NEW: time-of-day features ---------------
@@ -887,6 +888,7 @@ def make_time_windows(
 
         # metadata
         feats[("timestamp_israel")] = s0
+        feats['classification'] = classification
 
         rows.append(feats)
         if label_func is not None:
