@@ -83,9 +83,10 @@ def prepare_data_from_avro(data_root_dir, jerusalem_tz, trial_starting_datetime,
     clean_all_eda_df = remove_invalid_minutes(invalid_minutes_df, all_eda_df)
     all_temp_df = round_time_and_interpulate(all_temp_df)
     clean_all_temp_df = remove_invalid_minutes(invalid_minutes_df, all_temp_df)
+    print(user_processed_data_dir.joinpath("all_hr_df.parquet"))
     clean_all_hr_df.to_parquet(user_processed_data_dir.joinpath("all_hr_df.parquet"), index=False)
     clean_all_eda_df.to_parquet(user_processed_data_dir.joinpath("all_eda_df.parquet"), index=False)
-    clean_all_temp_df.to_parquet(user_processed_data_dir.joinpath("all_temp_df.parquet"), index=False)
+    clean_all_temp_df.to_parquet(output_path.joinpath("all_temp_df.parquet"), index=False)
 
 
 def round_time_and_interpulate(df):
@@ -243,7 +244,7 @@ def create_biomarkers_data_for_patient(path, patients_dict, data, patient, trail
     return data
 
 
-def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
+def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min', time_slot_windows=None):
     """
     Label biomarker rows by the nearest positive-severity tag within a time tolerance.
 
@@ -282,17 +283,20 @@ def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
     # 1) sample k per tag
     rng = np.random.default_rng()
     tag_index = pd.DatetimeIndex(tags_by_time.index)
-    # ks = rng.choice([15, 30, 40], size=len(tag_index))
-    ks = rng.choice([15], size=len(tag_index))
-
+    if time_slot_windows:
+        ks_before = rng.choice(time_slot_windows[0], size=len(tag_index))
+        ks_after = rng.choice(time_slot_windows[1], size=len(tag_index))
+    else:
+        ks_before = rng.choice([15], size=len(tag_index))
+        ks_after = rng.choice([15], size=len(tag_index))
 
     # 2) build windows  [start = tag - k,  end = tag + 10]
     meta = tags_by_time.reindex(tag_index)[["eventType", "severity"]]
     windows = pd.DataFrame({
         "tag_time": tag_index,
-        "k": ks,
-        "start": tag_index - pd.to_timedelta(ks, unit="m"),
-        "end": tag_index + pd.Timedelta(minutes=10),
+        "k": zip(ks_before, ks_after),
+        "start": tag_index - pd.to_timedelta(ks_before, unit="m"),
+        "end": tag_index + pd.to_timedelta(ks_after, unit="m"),
         "eventType": meta["eventType"].to_numpy(),
         "severity": meta["severity"].to_numpy(),
     }).sort_values("start")
@@ -309,7 +313,7 @@ def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
     )
 
     # 4) keep rows that fall inside the matched window (union of all windows)
-    in_window = merged["timestamp_israel"] <= merged["end"]
+    in_window = merged["timestamp_israel"] <= merged["end"]   # ERROR HERE - ALL ROWS ARE FALSE WHEN SOME NEED TO BE TRUE
 
     selected_rows = merged.loc[in_window, [
         "__rowid", "tag_time", "k", "start", "end", "eventType", "severity"
@@ -324,6 +328,7 @@ def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min'):
     # selected["k"] = selected_rows["k"].to_numpy()
     # selected["window_start"] = selected_rows["start"].to_numpy()
     # selected["window_end"] = selected_rows["end"].to_numpy()
+
     selected["eventType"] = selected_rows["eventType"].to_numpy()
     selected["severity"] = selected_rows["severity"].to_numpy()
 
@@ -503,7 +508,7 @@ def normalize_by_subject_and_state(
     return df
 
 
-def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', trail_dates_dict=None, normalize=False):
+def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', trail_dates_dict=None, normalize=False, time_slot_windows=None):
     """
     Build labeled biomarker datasets by (a) aggregating per-patient biomarker streams
     and (b) aligning them to nearby positive-severity tags.
@@ -545,7 +550,13 @@ def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', t
                 data = create_biomarkers_data_for_patient(data_path, patients_dict, data, patient, trail_dates_dict)
                 if normalize:
                     data = normalize_by_subject_and_state(data)
-                filtered_data, other_data = filter_biomarkers_data_around_tags_for_patient(tags, data, time)
+                if patient == 'TRAIL010':
+                    data['participant_full_id'] = data['participant_full_id'].str.replace('TRAIL10', 'TRAIL010',
+                                                                                          regex=False)
+                if patient == 'TRAIL011':
+                    data['participant_full_id'] = data['participant_full_id'].str.replace('TRAIL11', 'TRAIL011',
+                                                                                          regex=False)
+                filtered_data, other_data = filter_biomarkers_data_around_tags_for_patient(tags, data, time, time_slot_windows)
                 filtered_around_tags_data = pd.concat([filtered_around_tags_data, filtered_data])
                 remaining_data = pd.concat([remaining_data, other_data])
     print('Total number of tags: ', total_number_of_tags)
@@ -940,18 +951,19 @@ def create_chunked_data(data, patients_dict, window_minutes=5, step_minutes=3, e
 
 
 if __name__ == '__main__':
+
     patients_dict = {
-        # 'TRAIL001': 'TRAIL001-3YK3L151K2',
-        # 'TRAIL002': 'TRAIL002-3YK3J1514F',
-        # 'TRAIL003': 'TRAIL003-3YK3K153QJ',
-        # 'TRAIL004': 'TRAIL004-3YK3J151CV',
-        # 'TRAIL005': 'TRAIL005-3YK3L151DR',
-        # 'TRAIL008': 'TRAIL008-3YK3J1514F',
-        # 'TRAIL009': 'TRAIL009-3YKC51P1YL',
-        # 'TRAIL010': 'TRAIL10-3YKC51P2H3',
+        'TRAIL001': 'TRAIL001-3YK3L151K2',
+        'TRAIL002': 'TRAIL002-3YK3J1514F',
+        'TRAIL003': 'TRAIL003-3YK3K153QJ',
+        'TRAIL004': 'TRAIL004-3YK3J151CV',
+        'TRAIL005': 'TRAIL005-3YK3L151DR',
+        'TRAIL008': 'TRAIL008-3YK3J1514F',
+        'TRAIL009': 'TRAIL009-3YKC51P1YL',
+        'TRAIL010': 'TRAIL10-3YKC51P2H3',
         'TRAIL011': 'TRAIL011-3YK3L151DR',
-        # 'TRAIL012': 'TRAIL012-3YK3L151K2',
-        # 'TRAIL013': 'TRAIL013-3YK3J1514F',
+        'TRAIL012': 'TRAIL012-3YK3L151K2',
+        'TRAIL013': 'TRAIL013-3YK3J1514F',
     }
 
     trail_dates = {
@@ -981,26 +993,26 @@ if __name__ == '__main__':
     window_minutes_list = [5, 7, 10, 15]
     step_minutes_list = [1, 3]
 
-    window_minutes_list = [10]
-    step_minutes_list = [3]
+    window_minutes_list = [60]
+    step_minutes_list = [60]
+
+    # for window_minutes in window_minutes_list:
+    #     for step_minutes in step_minutes_list:
+    #         tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
+    #         data_path = r'C:\Users\GONY\Desktop\Booggii\data'
+    #         chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\old_classification_{window_minutes}min_{step_minutes}step'
     #
-    for window_minutes in window_minutes_list:
-        for step_minutes in step_minutes_list:
-            tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
-            data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_{window_minutes}min_{step_minutes}step'
-
-            os.makedirs(chunked_data_path, exist_ok=True)
-            print('creating data')
-            positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time, trail_dates_dict=trail_dates_ts)
-            negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
-                                                step_minutes=step_minutes, enable_tod=False)
-            positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
-                                                step_minutes=step_minutes, enable_tod=False)
-            positive_data.to_pickle(
-                chunked_data_path + rf'\train_eval_positive_data_{window_minutes}min_{step_minutes}step.pkl')
-            negative_data.to_pickle(
-                chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+    #         os.makedirs(chunked_data_path, exist_ok=True)
+    #         print('creating data')
+    #         positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time, trail_dates_dict=trail_dates_ts)
+    #         negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
+    #                                             step_minutes=step_minutes, enable_tod=False)
+    #         positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
+    #                                             step_minutes=step_minutes, enable_tod=False)
+    #         positive_data.to_pickle(
+    #             chunked_data_path + rf'\train_eval_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+    #         negative_data.to_pickle(
+    #             chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
 
             # eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
             #                                                                  time)
@@ -1014,43 +1026,43 @@ if __name__ == '__main__':
             #     chunked_data_path + rf'\test_positive_data_{window_minutes}min_{step_minutes}step.pkl')
             # eval_negative_data.to_pickle(
             #     chunked_data_path + rf'\test_negative_data_{window_minutes}min_{step_minutes}step.pkl')
-
+    #
+    # for window_minutes in window_minutes_list:
+    #     for step_minutes in step_minutes_list:
+    #         tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
+    #         data_path = r'C:\Users\GONY\Desktop\Booggii\data'
+    #         chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_{window_minutes}min_{step_minutes}step_normalized_'
+    #
+    #         os.makedirs(chunked_data_path, exist_ok=True)
+    #         print('creating data')
+    #         positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
+    #                                                                normalize=True, trail_dates_dict=trail_dates_ts)
+    #         negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
+    #                                             step_minutes=step_minutes, enable_tod=False)
+    #         positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
+    #                                             step_minutes=step_minutes, enable_tod=False)
+    #         positive_data.to_pickle(
+    #             chunked_data_path + rf'\train_eval_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+    #         negative_data.to_pickle(
+    #             chunked_data_path + rf'\train_eval_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+    #         #
+    #         # eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
+    #         #                                                                  time, normalize=True)
+    #         # eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
+    #         #                                          window_minutes=window_minutes,
+    #         #                                          step_minutes=step_minutes)
+    #         # eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
+    #         #                                          window_minutes=window_minutes,
+    #         #                                          step_minutes=step_minutes)
+    #         # eval_positive_data.to_pickle(
+    #         #     chunked_data_path + rf'\test_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+    #         # eval_negative_data.to_pickle(
+    #         #     chunked_data_path + rf'\test_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
     for window_minutes in window_minutes_list:
         for step_minutes in step_minutes_list:
             tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
             data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_{window_minutes}min_{step_minutes}step_normalized_'
-
-            os.makedirs(chunked_data_path, exist_ok=True)
-            print('creating data')
-            positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
-                                                                   normalize=True, trail_dates_dict=trail_dates_ts)
-            negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
-                                                step_minutes=step_minutes, enable_tod=False)
-            positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
-                                                step_minutes=step_minutes, enable_tod=False)
-            positive_data.to_pickle(
-                chunked_data_path + rf'\train_eval_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
-            negative_data.to_pickle(
-                chunked_data_path + rf'\train_eval_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
-            #
-            # eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
-            #                                                                  time, normalize=True)
-            # eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
-            #                                          window_minutes=window_minutes,
-            #                                          step_minutes=step_minutes)
-            # eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
-            #                                          window_minutes=window_minutes,
-            #                                          step_minutes=step_minutes)
-            # eval_positive_data.to_pickle(
-            #     chunked_data_path + rf'\test_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
-            # eval_negative_data.to_pickle(
-            #     chunked_data_path + rf'\test_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
-    for window_minutes in window_minutes_list:
-        for step_minutes in step_minutes_list:
-            tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
-            data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_tod_features{window_minutes}min_{step_minutes}step'
+            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\old_classification_tod_features{window_minutes}min_{step_minutes}step'
 
             os.makedirs(chunked_data_path, exist_ok=True)
             print('creating data')
@@ -1063,35 +1075,35 @@ if __name__ == '__main__':
                 chunked_data_path + rf'\train_eval_positive_data_{window_minutes}min_{step_minutes}step.pkl')
             negative_data.to_pickle(
                 chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
-
-            # eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
-            #                                                                  time)
-            # eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
-            #                                          window_minutes=window_minutes,
-            #                                          step_minutes=step_minutes)
-            # eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
-            #                                          window_minutes=window_minutes,
-            #                                          step_minutes=step_minutes)
-            # eval_positive_data.to_pickle(
-            #     chunked_data_path + rf'\test_positive_data_{window_minutes}min_{step_minutes}step.pkl')
-            # eval_negative_data.to_pickle(
-            #     chunked_data_path + rf'\test_negative_data_{window_minutes}min_{step_minutes}step.pkl')
-
-    for window_minutes in window_minutes_list:
-        for step_minutes in step_minutes_list:
-            tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
-            data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-            chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_tod_features{window_minutes}min_{step_minutes}step_normalized_'
-
-            os.makedirs(chunked_data_path, exist_ok=True)
-            print('creating data')
-            positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
-                                                                   normalize=True, trail_dates_dict=trail_dates_ts)
-            negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
-                                                step_minutes=step_minutes, enable_tod=True)
-            positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
-                                                step_minutes=step_minutes, enable_tod=True)
-            positive_data.to_pickle(
-                chunked_data_path + rf'\train_eval_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
-            negative_data.to_pickle(
-                chunked_data_path + rf'\train_eval_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+    #
+    #         # eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path,
+    #         #                                                                  time)
+    #         # eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict,
+    #         #                                          window_minutes=window_minutes,
+    #         #                                          step_minutes=step_minutes)
+    #         # eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict,
+    #         #                                          window_minutes=window_minutes,
+    #         #                                          step_minutes=step_minutes)
+    #         # eval_positive_data.to_pickle(
+    #         #     chunked_data_path + rf'\test_positive_data_{window_minutes}min_{step_minutes}step.pkl')
+    #         # eval_negative_data.to_pickle(
+    #         #     chunked_data_path + rf'\test_negative_data_{window_minutes}min_{step_minutes}step.pkl')
+    #
+    # for window_minutes in window_minutes_list:
+    #     for step_minutes in step_minutes_list:
+    #         tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
+    #         data_path = r'C:\Users\GONY\Desktop\Booggii\data'
+    #         chunked_data_path = fr'C:\Users\GONY\Desktop\Booggii\processed_data\trail11_old_classification_tod_features{window_minutes}min_{step_minutes}step_normalized_'
+    #
+    #         os.makedirs(chunked_data_path, exist_ok=True)
+    #         print('creating data')
+    #         positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
+    #                                                                normalize=True, trail_dates_dict=trail_dates_ts)
+    #         negative_data = create_chunked_data(negative_data, patients_dict, window_minutes=window_minutes,
+    #                                             step_minutes=step_minutes, enable_tod=True)
+    #         positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
+    #                                             step_minutes=step_minutes, enable_tod=True)
+    #         positive_data.to_pickle(
+    #             chunked_data_path + rf'\train_eval_positive_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
+    #         negative_data.to_pickle(
+    #             chunked_data_path + rf'\train_eval_negative_data_normalized_{window_minutes}min_{step_minutes}step.pkl')
