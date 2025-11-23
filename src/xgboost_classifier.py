@@ -338,17 +338,17 @@ def prep_data(positive_data, negative_data, multiclassification=False, participe
 
 if __name__ == '__main__':
     patients_dict = {
-        # 'TRAIL001': 'TRAIL001-3YK3L151K2',
-        # 'TRAIL002': 'TRAIL002-3YK3J1514F',
-        # 'TRAIL003': 'TRAIL003-3YK3K153QJ',
-        # 'TRAIL004': 'TRAIL004-3YK3J151CV',
-        # 'TRAIL005': 'TRAIL005-3YK3L151DR',
-        # 'TRAIL008': 'TRAIL008-3YK3J1514F',
-        # 'TRAIL009': 'TRAIL009-3YKC51P1YL',
-        # 'TRAIL010': 'TRAIL10-3YKC51P2H3',
+        'TRAIL001': 'TRAIL001-3YK3L151K2',
+        'TRAIL002': 'TRAIL002-3YK3J1514F',
+        'TRAIL003': 'TRAIL003-3YK3K153QJ',
+        'TRAIL004': 'TRAIL004-3YK3J151CV',
+        'TRAIL005': 'TRAIL005-3YK3L151DR',
+        'TRAIL008': 'TRAIL008-3YK3J1514F',
+        'TRAIL009': 'TRAIL009-3YKC51P1YL',
+        'TRAIL010': 'TRAIL10-3YKC51P2H3',
         'TRAIL011': 'TRAIL012-3YK3L151K2',
-        # 'TRAIL012': 'TRAIL012-3YK3L151K2',
-        # 'TRAIL013': 'TRAIL013-3YK3J1514F',
+        'TRAIL012': 'TRAIL012-3YK3L151K2',
+        'TRAIL013': 'TRAIL013-3YK3J1514F',
     }
 
     trail_dates = {
@@ -374,8 +374,8 @@ if __name__ == '__main__':
     }
 
     time = '15min'
-    window_minutes = 10
-    step_minutes = 3
+    window_minutes = 60*3
+    step_minutes = 60*3
     normalize = False
     standard_scaling = False
     multiclassification = False
@@ -391,10 +391,6 @@ if __name__ == '__main__':
             chunked_data_path + rf"\train_eval_positive_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
         negative_data = pd.read_pickle(
             chunked_data_path + rf"\train_eval_negative_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
-        # eval_positive_data = pd.read_pickle(
-        #     chunked_data_path + rf"\test_positive_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
-        # eval_negative_data = pd.read_pickle(
-        #     chunked_data_path + rf"\test_negative_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
     else:
         os.makedirs(chunked_data_path, exist_ok=True)
         print('creating data')
@@ -410,26 +406,12 @@ if __name__ == '__main__':
         negative_data.to_pickle(
             chunked_data_path + rf'\train_eval_negative_data_{window_minutes}min_{step_minutes}step.pkl')
 
-        # eval_positive_data, eval_negative_data = prepare_biomarkers_data(eval_patients_dict, tags_path, data_path, time,
-        #                                                                  trail_dates_ts)
-        # eval_negative_data = create_chunked_data(eval_negative_data, eval_patients_dict, window_minutes=window_minutes,
-        #                                          step_minutes=step_minutes)
-        # eval_positive_data = create_chunked_data(eval_positive_data, eval_patients_dict, window_minutes=window_minutes,
-        #                                          step_minutes=step_minutes)
-        # eval_positive_data.to_pickle(
-        #     chunked_data_path + rf'\test_positive_data_normalize_{window_minutes}min_{step_minutes}step.pkl')
-        # eval_negative_data.to_pickle(
-        #     chunked_data_path + rf'\test_negative_data_normalize_{window_minutes}min_{step_minutes}step.pkl')
-
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d_%H-%M")
     time_str = "new__code_XGBoost_withpulse" + ('multiclassification_' if multiclassification else '') + time_str
     output_dir = os.path.join(r'C:\Users\GONY\Desktop\Booggii\results\xgboost_output', 'results', time_str)
     os.makedirs(output_dir, exist_ok=True)
 
-    # patients_dict.update(eval_patients_dict)
-    # positive_data = pd.concat([positive_data, eval_positive_data])
-    # negative_data = pd.concat([negative_data, eval_negative_data])
     for patient in patients_dict.keys():
         print(f'XGBoost training on patient {patient}')
         temp_path = os.path.join(output_dir, f'eval_{patient}')
