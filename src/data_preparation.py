@@ -244,65 +244,125 @@ def create_biomarkers_data_for_patient(path, patients_dict, data, patient, trail
     return data
 
 
-def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min', time_slot_windows=None):
-    """
-    Label biomarker rows by the nearest positive-severity tag within a time tolerance.
+def generate_probability_classification(data, selected_rows, selected, sigma_min = 30 ):
+    rng = np.random.default_rng()
 
-    For each row in ``data``, the function finds the nearest event in ``tags`` within
-    ``tolerance = pd.Timedelta(time)`` (default 15 minutes), using the
-    ``timestamp_israel`` index. Only tags with ``severity > 0`` are considered.
-    The result is split into two DataFrames:
-      - ``df_selected``: rows that matched a nearby tag (with added ``eventType`` and ``severity``)
-      - ``df_remaining``: rows without a nearby tag
+    peak_before_min = rng.uniform(2, 10)
+    t_peak = data["tag_time"] - pd.to_timedelta(peak_before_min, unit="m")
+
+    delta_min = (data["timestamp_israel"] - t_peak) / pd.Timedelta(minutes=1)
+
+    probs = np.zeros(len(data), dtype=float)
+    inside = (
+            data["start"].notna()
+            & (data["timestamp_israel"] >= data["start"])
+            & (data["timestamp_israel"] <= data["end"])
+    )
+
+    probs[inside] = np.exp(- (delta_min[inside] ** 2) / (2 * sigma_min ** 2))
+
+    # 5. עכשיו מוסיפים את זה ל-selected
+    # selected["event_prob"] = probs[selected_rows["__rowid"].to_numpy()]
+
+    return selected
+
+
+import numpy as np
+import pandas as pd
+
+
+def filter_biomarkers_data_around_tags_for_patient(
+    tags,
+    data,
+    time='15min',
+    time_slot_windows=None,
+    remove_gray_timestamps=False,
+    severity = False
+):
+    """
+    Label biomarker rows by the nearest positive-severity tag within a time tolerance,
+    create windows around those tags, and split data into selected vs remaining.
 
     Args:
-        tags (pandas.DataFrame): Tag data containing at least
-            ``['timestamp_israel', 'eventType', 'severity']``.
-        data (pandas.DataFrame): Biomarker data containing ``timestamp_israel``.
-        time (str | pandas.Timedelta, optional): Time tolerance for nearest-match
-            (e.g., '15min', '5m', '1H'). Defaults to '15min'.
+        tags (pd.DataFrame): Must contain ['timestamp_israel', 'eventType', 'severity'].
+        data (pd.DataFrame): Must contain ['timestamp_israel'].
+        time (str | pd.Timedelta): Base window size (e.g. '15min').
+        time_slot_windows (tuple[list[int], list[int]] | None):
+            If given, (before_minutes_list, after_minutes_list).
+            For each tag we sample k_before and k_after from these lists.
+        remove_gray_timestamps (bool): If True, remove from remaining all rows
+            whose timestamp is within 120 minutes of any positive tag.
 
     Returns:
-        tuple[pandas.DataFrame, pandas.DataFrame]:
-            (df_selected, df_remaining) as described above.
+        (selected, remaining)
     """
-    positive_tags = tags[tags['severity'] > 0]
-    # Set index to timestamp for both eventType and severity
-    tags_by_time = positive_tags.set_index('timestamp_israel')[['eventType', 'severity']]
 
-    # Remove duplicate timestamps, keeping the last occurrence
-    tags_by_time = tags_by_time[~tags_by_time.index.duplicated(keep='last')]
-    tags_by_time = tags_by_time.sort_index(kind='mergesort')
+    # ------------------------------------------------------------------
+    # 1) Keep only positive-severity tags and prepare them by time
+    # ------------------------------------------------------------------
+    positive_tags = tags[tags['severity'] > 0].copy()
 
-    # Find nearest events for both columns
-    nearest_events = tags_by_time.reindex(
-        data['timestamp_israel'],
-        method='nearest',
-        tolerance=pd.Timedelta(time)
+    tags_by_time = (
+        positive_tags
+        .set_index('timestamp_israel')[['eventType', 'severity']]
+        .sort_index(kind='mergesort')
     )
-    # 1) sample k per tag
-    rng = np.random.default_rng()
+    # Drop duplicate timestamps (keep last)
+    tags_by_time = tags_by_time[~tags_by_time.index.duplicated(keep='last')]
+
     tag_index = pd.DatetimeIndex(tags_by_time.index)
+
+    # ------------------------------------------------------------------
+    # 2) Determine window sizes (k_before, k_after) in minutes
+    # ------------------------------------------------------------------
     if time_slot_windows:
+        # Sample per tag from provided lists
+        rng = np.random.default_rng()
         ks_before = rng.choice(time_slot_windows[0], size=len(tag_index))
         ks_after = rng.choice(time_slot_windows[1], size=len(tag_index))
-    else:
-        ks_before = rng.choice([15], size=len(tag_index))
-        ks_after = rng.choice([15], size=len(tag_index))
+    elif severity:
+        severity_to_window_before = {4: 20,
+                              3: 15,
+                              2: 7,
+                              1: 5}
+        severity_to_window_after = {4: 10,
+                                     3: 10,
+                                     2: 2,
+                                     1: 2}
+        ks_before = [severity_to_window_before[sev] for sev in positive_tags['severity']]
+        ks_after = [severity_to_window_after[sev] for sev in positive_tags['severity']]
 
-    # 2) build windows  [start = tag - k,  end = tag + 10]
-    meta = tags_by_time.reindex(tag_index)[["eventType", "severity"]]
+
+    else:
+        # Use a fixed window based on `time`
+        base_minutes = int(pd.Timedelta(time).total_seconds() // 60)
+        ks_before = np.full(len(tag_index), base_minutes, dtype=int)
+        ks_after = np.full(len(tag_index), base_minutes, dtype=int)
+
+    # ------------------------------------------------------------------
+    # 3) Build windows around each tag
+    #    start = tag_time - k_before
+    #    end   = tag_time + k_after
+    # ------------------------------------------------------------------
     windows = pd.DataFrame({
         "tag_time": tag_index,
-        "k": zip(ks_before, ks_after),
+        "k": list(zip(ks_before, ks_after)),
         "start": tag_index - pd.to_timedelta(ks_before, unit="m"),
         "end": tag_index + pd.to_timedelta(ks_after, unit="m"),
-        "eventType": meta["eventType"].to_numpy(),
-        "severity": meta["severity"].to_numpy(),
+        "eventType": tags_by_time["eventType"].to_numpy(),
+        "severity": tags_by_time["severity"].to_numpy(),
     }).sort_values("start")
 
-    # 3) merge_asof to assign each data row the most recent window start (if any)
-    data_sorted = data.assign(__rowid=np.arange(len(data))).sort_values("timestamp_israel")
+    # ------------------------------------------------------------------
+    # 4) For each data row, find the latest window whose start <= timestamp
+    #    (merge_asof backward on start), then keep rows inside that window.
+    # ------------------------------------------------------------------
+    data_sorted = (
+        data
+        .assign(__rowid=np.arange(len(data)))
+        .sort_values("timestamp_israel")
+    )
+
     merged = pd.merge_asof(
         data_sorted,
         windows,
@@ -312,41 +372,74 @@ def filter_biomarkers_data_around_tags_for_patient(tags, data, time='15min', tim
         allow_exact_matches=True,
     )
 
-    # 4) keep rows that fall inside the matched window (union of all windows)
-    in_window = merged["timestamp_israel"] <= merged["end"]   # ERROR HERE - ALL ROWS ARE FALSE WHEN SOME NEED TO BE TRUE
+    # Row is "selected" if it falls inside its matched window
+    in_window = merged["timestamp_israel"] <= merged["end"]
 
     selected_rows = merged.loc[in_window, [
         "__rowid", "tag_time", "k", "start", "end", "eventType", "severity"
     ]]
 
-    # Build 'selected' by iloc with row positions so ordering & alignment match
+    # ------------------------------------------------------------------
+    # 5) Build `selected` from original data order via __rowid
+    # ------------------------------------------------------------------
     rowpos = selected_rows["__rowid"].to_numpy()
     selected = data.iloc[rowpos].copy()
-
-    # Attach the window metadata (same order as rowpos)
-    # selected["tag_time"] = selected_rows["tag_time"].to_numpy()
-    # selected["k"] = selected_rows["k"].to_numpy()
-    # selected["window_start"] = selected_rows["start"].to_numpy()
-    # selected["window_end"] = selected_rows["end"].to_numpy()
 
     selected["eventType"] = selected_rows["eventType"].to_numpy()
     selected["severity"] = selected_rows["severity"].to_numpy()
 
-    # 'remaining' = everything not selected (preserves original order)
+    # Your existing probability classification logic
+    # selected = generate_probability_classification(
+    #     merged,
+    #     selected_rows,
+    #     selected,
+    #     sigma_min=30
+    # )
+
+    # ------------------------------------------------------------------
+    # 6) Build `remaining` = everything not selected
+    # ------------------------------------------------------------------
     mask = np.zeros(len(data), dtype=bool)
     mask[rowpos] = True
     remaining = data.iloc[~mask].copy()
-    # # Copy data and add both eventType and severity columns
-    # data_with_event = data.copy()
-    # data_with_event = windowed.copy()
-    # # data_with_event['eventType'] = nearest_events['eventType'].values
-    # # data_with_event['severity'] = nearest_events['severity'].values
-    #
-    # # rows WITH matching tag (where eventType is not null)
-    # df_selected = data_with_event[data_with_event['eventType'].notna()]
-    #
-    # # rows WITHOUT matching tag (where eventType is null)
-    # df_remaining = data_with_event[data_with_event['eventType'].isna()]
+    # remaining['event_prob'] = 0.0
+
+    # ------------------------------------------------------------------
+    # 7) Optionally remove timestamps near any positive tag
+    #    (within 120 minutes = 2 hours)
+    # ------------------------------------------------------------------
+    if remove_gray_timestamps and not positive_tags.empty:
+        # Sort for merge_asof
+        remaining_tmp = (
+            remaining
+            .sort_values("timestamp_israel")
+            .assign(__rowid=np.arange(len(remaining)))
+        )
+
+        pos_times = (
+            selected[["timestamp_israel"]]
+            .drop_duplicates()
+            .sort_values("timestamp_israel")
+            .rename(columns={"timestamp_israel": "tag_time"})
+        )
+
+        merged_rem = pd.merge_asof(
+            remaining_tmp,
+            pos_times,
+            left_on="timestamp_israel",
+            right_on="tag_time",
+            direction="nearest",
+            tolerance=pd.Timedelta("120min"),
+        )
+
+        # Keep only rows with NO nearby positive tag
+        keep_mask = merged_rem["tag_time"].isna()
+        remaining = (
+            merged_rem.loc[keep_mask]
+            .drop(columns=["__rowid", "tag_time"])
+            .sort_index()
+        )
+
     return selected, remaining
 
 
@@ -508,7 +601,8 @@ def normalize_by_subject_and_state(
     return df
 
 
-def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', trail_dates_dict=None, normalize=False, time_slot_windows=None):
+def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', trail_dates_dict=None, normalize=False,
+                            time_slot_windows=None, remove_gray_timestamps=False, severity=False):
     """
     Build labeled biomarker datasets by (a) aggregating per-patient biomarker streams
     and (b) aligning them to nearby positive-severity tags.
@@ -556,7 +650,9 @@ def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', t
                 if patient == 'TRAIL011':
                     data['participant_full_id'] = data['participant_full_id'].str.replace('TRAIL11', 'TRAIL011',
                                                                                           regex=False)
-                filtered_data, other_data = filter_biomarkers_data_around_tags_for_patient(tags, data, time, time_slot_windows)
+                filtered_data, other_data = filter_biomarkers_data_around_tags_for_patient(tags, data, time,
+                                                                                           time_slot_windows, remove_gray_timestamps=remove_gray_timestamps,
+                                                                                           severity=severity)
                 filtered_around_tags_data = pd.concat([filtered_around_tags_data, filtered_data])
                 remaining_data = pd.concat([remaining_data, other_data])
     print('Total number of tags: ', total_number_of_tags)
@@ -781,6 +877,7 @@ def make_time_windows(
     value_cols=None,
     group_col=None,
     label_func=None,
+    classification_column='classification',
     # --- NEW: time-of-day features params (all optional) ---
     enable_tod: bool = True,
     tod_slot_minutes: int = 15,
@@ -802,7 +899,7 @@ def make_time_windows(
         if group_col and group_col in value_cols:
             value_cols.remove(group_col)
         # defensive: drop if present
-        for col_to_drop in ['timestamp_unix', 'severity', 'classification']:
+        for col_to_drop in ['timestamp_unix', 'severity', 'classification', 'event_prob']:
             if col_to_drop in value_cols:
                 value_cols.remove(col_to_drop)
 
@@ -826,14 +923,16 @@ def make_time_windows(
 
     rows = []
     labels = []
+    chunks = []
 
     for s0 in starts:
         s1 = s0 + window
         chunk = tmp.loc[(tmp.index >= s0) & (tmp.index < s1)]
         if chunk.empty:
             continue
-        classification = max(chunk['classification'])
+        classification = max(chunk[classification_column])
         chunk = chunk.drop(columns=['classification'])
+        chunks.append(chunk)
         feats = _window_features(chunk, value_cols)
 
         # -------------- NEW: time-of-day features ---------------
@@ -888,7 +987,9 @@ def make_time_windows(
 
         # metadata
         feats[("timestamp_israel")] = s0
-        feats['classification'] = classification
+        feats[classification_column] = classification
+        if classification_column != 'classification':
+            feats['classification'] = 1 if classification else 0
 
         rows.append(feats)
         if label_func is not None:
@@ -907,12 +1008,12 @@ def make_time_windows(
     if "label" in X.columns:
         y = X.pop("label")
         return X, y
-    return X, None
+    return X, chunks
 
 
 # --------------------- dataset chunker ---------------------
 
-def create_chunked_data(data, patients_dict, window_minutes=5, step_minutes=3, enable_tod=False, **mw_kwargs):
+def create_chunked_data(data, patients_dict, window_minutes=5, step_minutes=3, enable_tod=False, classification_column='classification', **mw_kwargs):
     """
     Pass time-of-day feature controls via **mw_kwargs if you want:
         enable_tod=True/False,
@@ -924,6 +1025,8 @@ def create_chunked_data(data, patients_dict, window_minutes=5, step_minutes=3, e
         keep_same_wk=True
     """
     res = pd.DataFrame()
+    patient_raw_data = pd.DataFrame()
+
     if 'missing_value_reason' in data.columns:
         data = data.drop(columns=['missing_value_reason'])
     for patient in patients_dict.keys():
@@ -936,16 +1039,18 @@ def create_chunked_data(data, patients_dict, window_minutes=5, step_minutes=3, e
         patient_data = data[data['participant_full_id'].str.contains(patient, na=False)]
         patient = patient_data['participant_full_id'].unique()
         try:
-            patient_data, _ = make_time_windows(
+            patient_data, chunks = make_time_windows(
                 df=patient_data,
                 ts_col='timestamp_israel',
                 window_minutes=window_minutes,
                 step_minutes=step_minutes,
                 enable_tod=enable_tod,
+                classification_column=classification_column,
                 **mw_kwargs
             )
             patient_data['participant_full_id'] = patient[0]
             res = pd.concat([res, patient_data], ignore_index=True)
+            patient_raw_data = pd.concat([patient_raw_data, ])
         except Exception as e:
             print(e)
             continue
