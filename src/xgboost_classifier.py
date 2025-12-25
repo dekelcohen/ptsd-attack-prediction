@@ -2,32 +2,44 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import os
+import json
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.preprocessing import StandardScaler
-
-from sklearn.utils import resample
 from sklearn.metrics import confusion_matrix, PrecisionRecallDisplay, precision_recall_curve
 from sklearn.metrics import f1_score, precision_recall_curve
-
-import xgboost as xgb
 from sklearn.model_selection import train_test_split, GridSearchCV, ParameterGrid
 from sklearn.metrics import classification_report
 
 from data_preparation import prepare_biomarkers_data, create_chunked_data
-
+from models import lasso_model, svm_model, decision_tree_model, rnn_model
 import warnings
+
 warnings.filterwarnings("ignore")
+
+from sklearn.preprocessing import StandardScaler
+
+from sklearn.model_selection import ParameterGrid
+
+import xgboost as xgb
 
 
 class xgboost_model():
-    def __init__(self, X_train, X_val, X_test, y_train, y_val, y_test, multiclassification, output_dir, standard_scale=False,
+    def __init__(self, X_train, X_val, X_test, y_train, y_val, y_test, multiclassification, output_dir,
+                 standard_scale=False,
                  n_estimators=100, max_depth=6, learning_rate=0.3, subsample=1.0):
         self.multiclassification = multiclassification
         self.output_dir = output_dir
         num_classes = set(pd.concat([y_train, y_test]))
         y_train_count = y_train.value_counts()
-        self.scale_pos_weight = y_train_count[0] / y_train_count[1]
+        # if set(y_train.unique()) <= {0, 1}:
+        if True:
+            # classic binary labels
+            y_train_count = y_train.value_counts()
+            self.scale_pos_weight = y_train_count[0] / y_train_count[1]
+        else:
+            # soft labels in [0,1]
+            pos_mean = y_train.mean()
+            self.scale_pos_weight = (1 - pos_mean) / max(pos_mean, 1e-6)
         if standard_scale:
             scaler = StandardScaler()
             scaler.fit(X_train)
@@ -36,32 +48,18 @@ class xgboost_model():
             X_test = scaler.transform(X_test)
         self.X_train, self.X_val, self.X_test, self.y_train, self.y_val, self.y_test = X_train, X_val, X_test, y_train, y_val, y_test
 
-        if multiclassification:
-            self.model = xgb.XGBClassifier(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                learning_rate=learning_rate,
-                subsample=subsample,
+        self.model = xgb.XGBClassifier(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            subsample=subsample,
 
-                random_state=42,
-                objective="multi:softprob ",  # or "multi:softmax"
-                num_class=num_classes,
-                scale_pos_weight=self.scale_pos_weight,
-                eval_metric="mlogloss"
-            )
-        else:
-            self.model = xgb.XGBClassifier(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                learning_rate=learning_rate,
-                subsample=subsample,
-
-                random_state=42,
-                objective="binary:logistic",
-                use_label_encoder=False,
-                eval_metric="logloss",
-                scale_pos_weight=self.scale_pos_weight
-            )
+            random_state=42,
+            objective="binary:logistic",
+            use_label_encoder=False,
+            eval_metric="logloss",
+            scale_pos_weight=self.scale_pos_weight
+        )
 
         self.threshold = 0.5
 
@@ -221,7 +219,7 @@ def split_train_test_by_day(X):
 
     # Split based on days
     train_days, val_days = train_test_split(
-        unique_days, test_size=0.25, random_state=40
+        unique_days, test_size=0.25, random_state=42
     )
 
     # Create masks for samples belonging to the selected days
@@ -272,19 +270,19 @@ def prep_onehotencoded_columns(orgX):
 
 
 def prep_data(positive_data, negative_data, multiclassification=False, participent_in_test=None, split_by_time=None,
-              standard_scale=False, num_weeks=None):
-    if multiclassification:
-        positive_data['classification'] = positive_data['severity']
-
-        mapping = {0: 0, 1: 1, 2: 1, 3: 2, 4: 2}
-        positive_data["classification"] = positive_data["severity"].map(mapping)
-        negative_data['classification'] = 0
-        negative_data['severity'] = 0
-    else:
-        positive_data['classification'] = 1
-        negative_data['classification'] = 0
-
-        negative_data['eventType'] = 'None'
+              standard_scale=False, num_weeks=None, classification_column='classification'):
+    # if multiclassification:
+    #     positive_data['classification'] = positive_data['severity']
+    #
+    #     mapping = {0: 0, 1: 1, 2: 1, 3: 2, 4: 2}
+    #     positive_data["classification"] = positive_data["severity"].map(mapping)
+    #     negative_data['classification'] = 0
+    #     negative_data['severity'] = 0
+    # else:
+    #     positive_data['classification'] = 1
+    #     negative_data['classification'] = 0
+    #
+    #     negative_data['eventType'] = 'None'
 
     orgX = pd.concat([positive_data, negative_data])
     orgX = orgX.sort_values('timestamp_israel')
@@ -297,6 +295,8 @@ def prep_data(positive_data, negative_data, multiclassification=False, participe
     X["hour"] = X["timestamp_israel"].dt.hour
     X["dow"] = X["timestamp_israel"].dt.dayofweek
     X["dom"] = X["timestamp_israel"].dt.day
+    X = X.dropna()
+
     if participent_in_test:
         X_test = X[X['participant_full_id'].str.contains(participent_in_test, na=False)]
         X_train = X[~X['participant_full_id'].str.contains(participent_in_test, na=False)]
@@ -311,19 +311,19 @@ def prep_data(positive_data, negative_data, multiclassification=False, participe
             X_test.drop(X_week_data.index)
             X_train = X_week_data
 
-        y_train = X_train['classification']
-        y_test = X_test['classification']
+        y_train = X_train[classification_column]
+        y_test = X_test[classification_column]
     else:
         X_train, X_test = split_train_test_by_day(X)
         X_train, X_val = split_train_test_by_day(X_train)
 
-        y_train = X_train['classification']
-        y_test = X_test['classification']
-        y_val = X_val['classification']
+        y_train = X_train[classification_column]
+        y_test = X_test[classification_column]
+        y_val = X_val[classification_column]
 
-    X_train = X_train.drop(['classification', 'eventType', 'participant_full_id', 'timestamp_israel'], axis=1)
-    X_val = X_val.drop(['classification', 'eventType', 'participant_full_id', 'timestamp_israel'], axis=1)
-    X_test = X_test.drop(['classification', 'eventType', 'participant_full_id', 'timestamp_israel'], axis=1)
+    X_train = X_train.drop(['classification', 'participant_full_id', 'timestamp_israel'], axis=1)
+    X_val = X_val.drop(['classification', 'participant_full_id', 'timestamp_israel'], axis=1)
+    X_test = X_test.drop(['classification', 'participant_full_id', 'timestamp_israel'], axis=1)
 
     if standard_scale:
         scaler = StandardScaler().fit(X_train)
@@ -373,40 +373,50 @@ if __name__ == '__main__':
         for k, v in trail_dates.items()
     }
 
+    time_slot_windows_before_list = [35, 30, 25]
+    time_slot_windows_after_list = [5, 10, 15]
+
+    window_pairs = [[15], [15]]
+
     time = '15min'
-    window_minutes = 60 * 3
-    step_minutes = 60 * 3
+    window_minutes = 60*3
+    step_minutes = 60*3
     normalize = False
     standard_scaling = False
     multiclassification = False
 
     tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
     data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-    chunked_data_path = fr"C:\Users\GONY\Desktop\Booggii\processed_data\old_classification_tod_features{window_minutes}min_{step_minutes}step{'_normalized_' if normalize else ''}"
+    chunked_data_path = fr"C:\Users\GONY\Desktop\Booggii\processed_data\old_classification_tod_features_{window_minutes}min_{step_minutes}step{'_normalized_' if normalize else ''}"
 
     if os.path.exists(chunked_data_path):
         # if False:
         print('loading existing pickle files:')
+        print(chunked_data_path)
         positive_data = pd.read_pickle(
             chunked_data_path + rf"\positive_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
         negative_data = pd.read_pickle(
             chunked_data_path + rf"\negative_data_{'normalized_' if normalize else ''}{window_minutes}min_{step_minutes}step.pkl")
+        # positive_data['classification'] = 1
+        # negative_data['classification'] = 0
     else:
-        os.makedirs(chunked_data_path, exist_ok=True)
         print('creating data')
 
         positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
-                                                               trail_dates_ts)
+                                                               trail_dates_ts, time_slot_windows=window_pairs,
+                                                               remove_gray_timestamps=False)
         positive_data['classification'] = 1
         negative_data['classification'] = 0
         data = pd.concat([positive_data, negative_data])
         data = data.sort_values(by='timestamp_israel')
         data = create_chunked_data(data, patients_dict, window_minutes=window_minutes,
-                                            step_minutes=step_minutes, enable_tod=True)
-        positive_data = data[data['classification']==1]
+                                   step_minutes=step_minutes, enable_tod=True, classification_column='classification')
+        # data = data.drop(columns=['missing_value_reason', 'severity'])
+        positive_data = data[data['classification'] == 1]
         negative_data = data[data['classification'] == 0]
-        # positive_data = create_chunked_data(positive_data, patients_dict, window_minutes=window_minutes,
-        #                                     step_minutes=step_minutes, enable_tod=True)
+
+        os.makedirs(chunked_data_path, exist_ok=True)
+
         positive_data.to_pickle(
             chunked_data_path + rf'\positive_data_{window_minutes}min_{step_minutes}step.pkl')
         negative_data.to_pickle(
@@ -415,22 +425,44 @@ if __name__ == '__main__':
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d_%H-%M")
     time_str = "new__code_XGBoost_withpulse" + ('multiclassification_' if multiclassification else '') + time_str
-    output_dir = os.path.join(r'C:\Users\GONY\Desktop\Booggii\results\xgboost_output', 'results', time_str)
+    output_dir = os.path.join(r'C:\Users\GONY\Desktop\Booggii\results\rnn_output', 'results', time_str)
     os.makedirs(output_dir, exist_ok=True)
 
+    columns = ['pulse_rate_bpm_mean',
+               'pulse_rate_bpm_tod15_base_std',
+               'pulse_rate_bpm_tod15_base_mean', 'temperature_celsius_tod15_base_mean',
+               'eda_scl_usiemens_delta_vs_lastweek',
+               'eda_scl_usiemens_tod15_base_std',
+               'eda_scl_usiemens_tod15_z',
+               'eda_scl_usiemens_ema30_end',
+               'eda_scl_usiemens_median',
+               # 'eda_scl_usiemens_tod15_std',
+               'eda_scl_usiemens_min',
+               'accelerometers_std_g_tod15_base_mean', 'activity_counts_q75',
+               'activity_counts_tod15_delta',
+                'timestamp_israel', 'classification', 'participant_full_id'
+               ]
     for patient in patients_dict.keys():
-        print(f'XGBoost training on patient {patient}')
+        print(f'Evaluating patient {patient}')
         temp_path = os.path.join(output_dir, f'eval_{patient}')
         pos_data = positive_data[positive_data['participant_full_id'].str.contains(patient, na=False)]
         neg_data = negative_data[negative_data['participant_full_id'].str.contains(patient, na=False)]
+        # pos_data = pos_data[columns]
+        # neg_data = neg_data[columns]
         os.makedirs(temp_path, exist_ok=True)
-        X_train, X_val, X_test, y_train, y_val, y_test = prep_data(pos_data, neg_data)
+        X_train, X_val, X_test, y_train, y_val, y_test = prep_data(pos_data, neg_data,
+                                                                   classification_column='classification')
 
         print(
-            f'positive events in train set: {(sum(y_train) / len(y_train)) * 100}%\npositive events in val set: {(sum(y_val)/len(y_val))*100}%\npositive events in test set: {(sum(y_test)/len(y_test))*100}%')
-
+            f'positive events in train set: {(sum(y_train) / len(y_train)) * 100}%\npositive events in val set: {(sum(y_val) / len(y_val)) * 100}%\npositive events in test set: {(sum(y_test) / len(y_test)) * 100}%')
+        # print('\nXGBOOST:')
         xgboost = xgboost_model(X_train, X_val, X_test, y_train, y_val, y_test, output_dir=temp_path,
                                 multiclassification=False,
                                 n_estimators=100, learning_rate=0.01, subsample=0.8, max_depth=10
                                 )
         xgboost.run_model(grid_search=True)
+        # print('---------------------------------------------------------------------------------\nDecision Tree:')
+        #
+        # model = decision_tree_model(X_train, X_val, X_test, y_train, y_val, y_test, output_dir=temp_path)
+        # model.run_model(grid_search=False)
+        print('---------------------------------------------------------------------------------\n')

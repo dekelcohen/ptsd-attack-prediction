@@ -277,7 +277,14 @@ def filter_biomarkers_data_around_tags_for_patient(
     time='15min',
     time_slot_windows=None,
     remove_gray_timestamps=False,
-    severity = False
+    severity = False,
+    use_smote=False,
+    gray_tolerance="180min",          # matches your current code; set "120min" if you really want 2h
+    smote_sampling_strategy="auto",   # e.g. "auto" (to majority), 0.5, 1.0, etc.
+    smote_k_neighbors=5,
+    smote_random_state=42,
+    smote_feature_cols=None,
+    original_pos_boost=3
 ):
     """
     Label biomarker rows by the nearest positive-severity tag within a time tolerance,
@@ -429,16 +436,164 @@ def filter_biomarkers_data_around_tags_for_patient(
             left_on="timestamp_israel",
             right_on="tag_time",
             direction="nearest",
-            tolerance=pd.Timedelta("120min"),
+            tolerance=pd.Timedelta("180min"),
         )
 
         # Keep only rows with NO nearby positive tag
         keep_mask = merged_rem["tag_time"].isna()
+
+        gray_area = merged_rem.loc[~keep_mask].copy()
+        # label gray rows with nearest tag's eventType/severity
+        # (they already exist in merged_rem from pos_times)
+        # clean up
+        gray_area = gray_area.drop(columns=["__rowid"])
+        # gray_area["eventType"] = gray_area["eventType"]
+        # gray_area["severity"] = gray_area["severity"]
+
         remaining = (
             merged_rem.loc[keep_mask]
             .drop(columns=["__rowid", "tag_time"])
             .sort_index()
         )
+
+        if use_smote:
+            if not remove_gray_timestamps:
+                raise ValueError("use_smote=True requires remove_gray_timestamps=True (so gray area exists).")
+
+            if gray_area is None:
+                gray_area = pd.DataFrame()
+
+            try:
+                from imblearn.over_sampling import SMOTE
+            except ImportError as e:
+                raise ImportError("Please install imbalanced-learn: pip install imbalanced-learn") from e
+
+            # -------------------------
+            # Build two positive sets:
+            #   A) original tagged positives (selected)
+            #   B) gray-area positives (labeled by nearest tag)
+            # -------------------------
+            pos_tagged = selected.copy()
+            pos_tagged["pos_source"] = "tagged"
+            pos_tagged["is_synthetic"] = False
+
+            pos_gray = gray_area.copy()
+            if len(pos_gray) > 0:
+                pos_gray["pos_source"] = "gray"
+                pos_gray["is_synthetic"] = False
+                # (pos_gray already has eventType/severity from nearest tag in your code)
+
+            # -------------------------
+            # Choose SMOTE feature cols
+            # -------------------------
+            pos_pool_for_cols = pd.concat([pos_tagged, pos_gray], ignore_index=True) if len(pos_gray) else pos_tagged
+
+            if smote_feature_cols is None:
+                exclude = {"timestamp_israel", "eventType", "severity", "is_synthetic", "pos_source", "tag_time"}
+                numeric_cols = pos_pool_for_cols.select_dtypes(include=[np.number]).columns.tolist()
+                smote_feature_cols = [c for c in numeric_cols if c not in exclude]
+
+            if not smote_feature_cols:
+                raise ValueError("No numeric feature columns found for SMOTE. Pass smote_feature_cols explicitly.")
+
+            # -------------------------
+            # IMPORTANT: give more weight to original positives
+            # by replicating them in the SMOTE training data.
+            # -------------------------
+            if original_pos_boost < 1 or int(original_pos_boost) != original_pos_boost:
+                raise ValueError("original_pos_boost must be an integer >= 1")
+
+            pos_tagged_rep = pd.concat([pos_tagged] * int(original_pos_boost), ignore_index=True)
+
+            pos_train = (
+                pd.concat([pos_tagged_rep, pos_gray], ignore_index=True)
+                if len(pos_gray) else
+                pos_tagged_rep
+            )
+
+            # Negatives for SMOTE training are the cleaned remaining (after gray removal)
+            neg_train = remaining.copy()
+
+            # -------------------------
+            # Build X/y for SMOTE
+            # -------------------------
+            X_pos = pos_train[smote_feature_cols]
+            X_neg = neg_train[smote_feature_cols]
+
+            X_pos = X_pos.dropna()
+            X_neg = X_neg.dropna()
+            X = pd.concat([X_pos, X_neg], ignore_index=True)
+            y = np.concatenate([np.ones(len(X_pos), dtype=int), np.zeros(len(X_neg), dtype=int)])
+
+            minority_count = int((y == 1).sum())
+            if minority_count < 2:
+                # cannot SMOTE with <2 minority samples
+                # Return originals (tagged + gray if exists) as the "positives" output
+                positives_out = pd.concat([pos_tagged, pos_gray], ignore_index=True) if len(pos_gray) else pos_tagged
+                return positives_out, remaining
+
+            k = min(smote_k_neighbors, max(1, minority_count - 1))
+
+            sm = SMOTE(
+                sampling_strategy=smote_sampling_strategy,
+                k_neighbors=k,
+                random_state=smote_random_state,
+            )
+
+            X_res, y_res = sm.fit_resample(X, y)
+            X_res = pd.DataFrame(X_res, columns=smote_feature_cols)
+            y_res = np.asarray(y_res)
+
+            # -------------------------
+            # Identify synthetic rows
+            # imblearn appends new rows to the end
+            # -------------------------
+            n_orig = len(X)
+            n_res = len(X_res)
+            synthetic_global = np.zeros(n_res, dtype=bool)
+            if n_res > n_orig:
+                synthetic_global[n_orig:] = True
+
+            # Keep only positive rows from the resampled set
+            pos_idx = np.where(y_res == 1)[0]
+            X_pos_res = X_res.iloc[pos_idx].reset_index(drop=True)
+            pos_is_synth = synthetic_global[pos_idx]
+
+            # -------------------------
+            # Re-attach metadata for positives:
+            # - for real positives: keep their real metadata
+            # - for synthetic positives: sample a donor row, but bias donors to "tagged"
+            # -------------------------
+            # Donor pool is the *real* (non-replicated) positives:
+            donor_pool = pd.concat([pos_tagged, pos_gray], ignore_index=True) if len(pos_gray) else pos_tagged
+
+            # Donor weights: tagged get more probability than gray
+            if len(pos_gray):
+                w = np.where(donor_pool["pos_source"].to_numpy() == "tagged", float(original_pos_boost), 1.0)
+                w = w / w.sum()
+            else:
+                w = None  # only tagged exists
+
+            donors = donor_pool.sample(
+                n=len(X_pos_res),
+                replace=True,
+                random_state=smote_random_state,
+                weights=w
+            ).reset_index(drop=True)
+
+            positives_out = donors.copy()
+            positives_out.loc[:, smote_feature_cols] = X_pos_res.values
+            positives_out["is_synthetic"] = pos_is_synth
+
+            # If you want, mark synthetic timestamp as NaT (optional):
+            # positives_out.loc[positives_out["is_synthetic"], "timestamp_israel"] = pd.NaT
+
+            # -------------------------
+            # Return: original + augmented together
+            # (this includes tagged + gray + synthetic)
+            # -------------------------
+            positives_out = positives_out[positives_out["pos_source"]!= 'gray']
+            return positives_out, remaining
 
     return selected, remaining
 
@@ -500,7 +655,7 @@ def _label_sleep_awake(
     if activity_cols:
         activity_sleepiness_list = []
         for c in activity_cols:
-            z_act = _robust_z(gg[c])
+            z_act = _robust_z([c])
             # low activity => sleep: invert sign
             activity_sleepiness_list.append(1 / (1 + np.exp(1.5 * z_act)))
         act_sleepiness = np.nanmean(np.vstack(activity_sleepiness_list), axis=0)
@@ -602,7 +757,7 @@ def normalize_by_subject_and_state(
 
 
 def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', trail_dates_dict=None, normalize=False,
-                            time_slot_windows=None, remove_gray_timestamps=False, severity=False):
+                            time_slot_windows=None, remove_gray_timestamps=False, severity=False, use_smote=False):
     """
     Build labeled biomarker datasets by (a) aggregating per-patient biomarker streams
     and (b) aligning them to nearby positive-severity tags.
@@ -635,6 +790,8 @@ def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', t
         if file.endswith(".csv"):
             patient = file.split("_")[0]
             if patient in patients_dict.keys():
+                if 'new' not in file:
+                    continue
                 tags = pd.read_csv(os.path.join(tags_path, file))
                 # tags = tags[tags['eventType'] != 'other']
                 tags = df_timestamp_to_israel_time(tags, timestamp_col='timestamp')
@@ -652,7 +809,8 @@ def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', t
                                                                                           regex=False)
                 filtered_data, other_data = filter_biomarkers_data_around_tags_for_patient(tags, data, time,
                                                                                            time_slot_windows, remove_gray_timestamps=remove_gray_timestamps,
-                                                                                           severity=severity)
+                                                                                           severity=severity,
+                                                                                           use_smote=use_smote)
                 filtered_around_tags_data = pd.concat([filtered_around_tags_data, filtered_data])
                 remaining_data = pd.concat([remaining_data, other_data])
     print('Total number of tags: ', total_number_of_tags)
@@ -1138,3 +1296,54 @@ if __name__ == '__main__':
                 chunked_data_path + rf'\positive_data_{window_minutes}min_{step_minutes}step.pkl')
             negative_data.to_pickle(
                 chunked_data_path + rf'\negative_data_{window_minutes}min_{step_minutes}step.pkl')
+
+
+def undersample_negdata(data, patients_dict):
+    import random
+
+    data['date'] = data['timestamp_israel'].dt.date
+    new_df = pd.DataFrame()
+    for patient in patients_dict.keys():
+        df = data[data['participant_full_id'].str.contains(patient, na=False)]
+        days_all_zero = (
+            df.groupby('date')['classification']
+            .apply(lambda x: (x == 0).all())
+        )
+        days_all_zero = days_all_zero[days_all_zero].index.tolist()
+        print(f'patient {patient} has {len(days_all_zero)} all negative days')
+        if len(days_all_zero)<20:
+            df_filtered = df[~df['date'].isin(days_all_zero)].copy()
+        else:
+            sampled_days = random.sample(days_all_zero, 15)
+            df_filtered = df[~df['date'].isin(sampled_days)].copy()
+
+        df_filtered.drop(columns='date', inplace=True)
+        new_df = pd.concat([new_df, df_filtered])
+    new_df= new_df.sort_values(by='timestamp_israel')
+    return new_df
+
+
+def undersampl_train_negdata(data):
+    import random
+
+    # data['date'] = data['timestamp_israel'].dt.date
+    new_df = pd.DataFrame()
+    df = data.copy()
+    # for patient in patients_dict.keys():
+    #     df = data[data['participant_full_id'].str.contains(patient, na=False)]
+    days_all_zero = (
+        df.groupby('dom')['classification']
+        .apply(lambda x: (x == 0).all())
+    )
+    days_all_zero = days_all_zero[days_all_zero].index.tolist()
+    print(f'patient has {len(days_all_zero)} all negative days out of a total of {len(set(data["dom"].values))}')
+    if len(days_all_zero)<20:
+        df_filtered = df[~df['dom'].isin(days_all_zero)].copy()
+    else:
+        sampled_days = random.sample(days_all_zero, 15)
+        df_filtered = df[~df['dom'].isin(sampled_days)].copy()
+
+    # df_filtered.drop(columns='date', inplace=True)
+    new_df = pd.concat([new_df, df_filtered])
+    # new_df= new_df.sort_values(by='timestamp_israel')
+    return new_df
