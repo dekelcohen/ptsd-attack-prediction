@@ -10,7 +10,7 @@ from sklearn.metrics import f1_score, precision_recall_curve
 from sklearn.model_selection import train_test_split, GridSearchCV, ParameterGrid
 from sklearn.metrics import classification_report
 
-from data_preparation import prepare_biomarkers_data, create_chunked_data
+from data_preparation import prepare_biomarkers_data, create_chunked_data, undersample_negdata
 from models import lasso_model, svm_model, decision_tree_model, rnn_model
 import warnings
 
@@ -404,14 +404,19 @@ if __name__ == '__main__':
 
         positive_data, negative_data = prepare_biomarkers_data(patients_dict, tags_path, data_path, time,
                                                                trail_dates_ts, time_slot_windows=window_pairs,
-                                                               remove_gray_timestamps=False)
+                                                               remove_gray_timestamps=True)
         positive_data['classification'] = 1
         negative_data['classification'] = 0
         data = pd.concat([positive_data, negative_data])
         data = data.sort_values(by='timestamp_israel')
+
+        data = undersample_negdata(data, patients_dict)
+
         data = create_chunked_data(data, patients_dict, window_minutes=window_minutes,
                                    step_minutes=step_minutes, enable_tod=True, classification_column='classification')
         # data = data.drop(columns=['missing_value_reason', 'severity'])
+
+
         positive_data = data[data['classification'] == 1]
         negative_data = data[data['classification'] == 0]
 
