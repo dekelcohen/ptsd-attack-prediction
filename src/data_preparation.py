@@ -790,8 +790,6 @@ def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', t
         if file.endswith(".csv"):
             patient = file.split("_")[0]
             if patient in patients_dict.keys():
-                if 'new' not in file:
-                    continue
                 tags = pd.read_csv(os.path.join(tags_path, file))
                 # tags = tags[tags['eventType'] != 'other']
                 tags = df_timestamp_to_israel_time(tags, timestamp_col='timestamp')
