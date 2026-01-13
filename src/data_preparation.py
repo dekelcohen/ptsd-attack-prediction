@@ -437,7 +437,7 @@ def filter_biomarkers_data_around_tags_for_patient(
             left_on="timestamp_israel",
             right_on="tag_time",
             direction="nearest",
-            tolerance=pd.Timedelta("180min"),
+            tolerance=pd.Timedelta(gray_tolerance),
         )
 
         # Keep only rows with NO nearby positive tag
@@ -807,9 +807,11 @@ def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', t
                     data['participant_full_id'] = data['participant_full_id'].str.replace('TRAIL11', 'TRAIL011',
                                                                                           regex=False)
                 filtered_data, other_data = filter_biomarkers_data_around_tags_for_patient(tags, data, time,
-                                                                                           time_slot_windows, remove_gray_timestamps=remove_gray_timestamps,
+                                                                                           time_slot_windows,
+                                                                                           remove_gray_timestamps=remove_gray_timestamps,
                                                                                            severity=severity,
-                                                                                           use_smote=use_smote)
+                                                                                           use_smote=use_smote,
+                                                                                           gray_tolerance="180min")
                 filtered_around_tags_data = pd.concat([filtered_around_tags_data, filtered_data])
                 remaining_data = pd.concat([remaining_data, other_data])
     print('Total number of tags: ', total_number_of_tags)

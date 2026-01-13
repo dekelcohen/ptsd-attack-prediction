@@ -8,45 +8,21 @@ from pathlib import Path
 from data_visualization import prepare_data, detect_anomalies
 from biomarkers import Biomarker
 import openpyxl
+from utils import load_participant_dates
 
 
-PARTICIPANT_DATES = {}
-
-
-def load_participant_dates(excel_path):
-    global PARTICIPANT_DATES
-    try:
-        df = pd.read_excel(excel_path)
-        # normalize column names to lower case for easier matching
-        df.columns = df.columns.str.lower()
-        
-        # Identify columns
-        id_col = next((c for c in df.columns if 'user_id' in c), None)
-        start_col = next((c for c in df.columns if 'trial_starting_date' in c), None)
-        
-        if id_col and start_col:
-            # Create dictionary: {User_ID: Start_Date}
-            for _, row in df.iterrows():
-                uid = str(row[id_col]).strip()
-                s_date = row[start_col]
-                PARTICIPANT_DATES[uid] = s_date
-            print(f"Loaded start dates for {len(PARTICIPANT_DATES)} participants from Excel.")
-        else:
-            print(f"Could not find required columns in Excel. Found: {df.columns.tolist()}")
-            
-    except Exception as e:
-        print(f"Error loading Excel file: {e}")
-
-def get_start_date(user_id):
+def get_start_date(user_id, participant_dates):
     # Try the dictionary
-    if user_id in PARTICIPANT_DATES:
-        return pd.to_datetime(PARTICIPANT_DATES[user_id], dayfirst=True)
+    if user_id in participant_dates:
+        return pd.to_datetime(participant_dates[user_id]['start_date'], dayfirst=True)
     # Default fallback
     print(f"Warning: No start date found for {user_id}, using default.")
     return pd.to_datetime("2024-01-01")
 
+
 def modify_tag_timestamps(user_id, raw_tags_path=None, output_path=None, 
-                          max_modified_time_hours=6, cluster_gap_minutes=30):
+                          max_modified_time_hours=6, cluster_gap_minutes=30,
+                          participant_dates=None):
     
     jerusalem_tz = pytz.timezone('Asia/Jerusalem')
     data_root_dir = Path("data/embrace_plus/")
@@ -73,7 +49,7 @@ def modify_tag_timestamps(user_id, raw_tags_path=None, output_path=None,
     print(f"Reading tags from: {raw_tags_path}")
     
     # 2. Load Biomarker Data & Anomalies
-    trial_start_date = get_start_date(user_id)
+    trial_start_date = get_start_date(user_id, participant_dates)
     # Format for prepare_data is expected to be string or datetime
     # prepare_data expects a string usually? visualize_main passes string.
     # But it calls pd.to_datetime inside.
@@ -217,7 +193,7 @@ def modify_tag_timestamps(user_id, raw_tags_path=None, output_path=None,
 if __name__ == "__main__":
     # Load participant dates from Excel
     excel_path = r"data/embrace_plus/participants_extra_data/participant_data_periods.xlsx"
-    load_participant_dates(excel_path)
+    participant_dates = load_participant_dates(excel_path)
     
     # Paths
     raw_tags_dir = r"data/embrace_plus/participants_extra_data/valid_tags/raw_tags"
@@ -244,7 +220,8 @@ if __name__ == "__main__":
 
         print(f"\n--- Batch processing: {user_id} ---")
         try:
-            modify_tag_timestamps(user_id, raw_tags_path=raw_file_path, output_path=output_tags_dir)
+            modify_tag_timestamps(user_id, raw_tags_path=raw_file_path, output_path=output_tags_dir,
+                                  participant_dates=participant_dates)
         except Exception as e:
             print(f"Failed to process {user_id}: {e}")
 

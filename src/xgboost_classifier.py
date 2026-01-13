@@ -11,7 +11,7 @@ from sklearn.model_selection import train_test_split, GridSearchCV, ParameterGri
 from sklearn.metrics import classification_report
 
 from data_preparation import prepare_biomarkers_data, create_chunked_data, undersample_negdata
-from models import lasso_model, svm_model, decision_tree_model, rnn_model
+#from models import lasso_model, svm_model, decision_tree_model, rnn_model
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -295,7 +295,7 @@ def prep_data(positive_data, negative_data, multiclassification=False, participe
     X["hour"] = X["timestamp_israel"].dt.hour
     X["dow"] = X["timestamp_israel"].dt.dayofweek
     X["dom"] = X["timestamp_israel"].dt.day
-    X = X.dropna()
+    # X = X.dropna()
 
     if participent_in_test:
         X_test = X[X['participant_full_id'].str.contains(participent_in_test, na=False)]
@@ -338,40 +338,45 @@ def prep_data(positive_data, negative_data, multiclassification=False, participe
 
 if __name__ == '__main__':
     patients_dict = {
-        'TRAIL001': 'TRAIL001-3YK3L151K2',
-        'TRAIL002': 'TRAIL002-3YK3J1514F',
-        'TRAIL003': 'TRAIL003-3YK3K153QJ',
-        'TRAIL004': 'TRAIL004-3YK3J151CV',
-        'TRAIL005': 'TRAIL005-3YK3L151DR',
-        'TRAIL008': 'TRAIL008-3YK3J1514F',
-        'TRAIL009': 'TRAIL009-3YKC51P1YL',
-        'TRAIL010': 'TRAIL10-3YKC51P2H3',
-        'TRAIL011': 'TRAIL011-3YK3L151DR',
-        'TRAIL012': 'TRAIL012-3YK3L151K2',
-        'TRAIL013': 'TRAIL013-3YK3J1514F',
+        # 'TRAIL001': 'TRAIL001-3YK3L151K2',
+        # 'TRAIL002': 'TRAIL002-3YK3J1514F',
+        # 'TRAIL003': 'TRAIL003-3YK3K153QJ',
+        # 'TRAIL004': 'TRAIL004-3YK3J151CV',
+        # 'TRAIL005': 'TRAIL005-3YK3L151DR',
+        # 'TRAIL006': 'TRAIL006-3YK3J151CV',
+        # 'TRAIL008': 'TRAIL008-3YK3J1514F',
+        # 'TRAIL009': 'TRAIL009-3YKC51P1YL',
+        # 'TRAIL10': 'TRAIL10-3YKC51P2H3',
+        # 'TRAIL011': 'TRAIL011-3YK3L151DR',
+        # 'TRAIL012': 'TRAIL012-3YK3L151K2',
+        # 'TRAIL013': 'TRAIL013-3YK3J1514F',
+        # 'TRAIL014': 'TRAIL014-3YK3K153QJ',
+        # 'TRAIL015': 'TRAIL015-3YKC51P1YL',
+        # 'TRAIL016': 'TRAIL016-3YK3J151CV',
+        'TRAIL017': 'TRAIL017-3YK3J1514F',
     }
 
-    trail_dates = {
-        'TRAIL003': {'start_date': '30.3.2025 16:04', 'end_date': '29.4.2025 17:40'},
-        'TRAIL002': {'start_date': '9.4.2025 14:28', 'end_date': '8.5.2025 19:30'},
-        'TRAIL001': {'start_date': '24.4.2025 11:40', 'end_date': '23.5.2025 10:21'},
-        'TRAIL004': {'start_date': '27.4.2025 15:00', 'end_date': '26.5.2025 14:25'},
-        'TRAIL005': {'start_date': '14.5.2025 11:56', 'end_date': '17.6.2025 00:00'},
-        'TRAIL008': {'start_date': '10.7.2025 14:50', 'end_date': '10.8.2025 00:00'},
-        'TRAIL009': {'start_date': '31.7.2025 13:15', 'end_date': '29.8.2025 10:00'},
-        'TRAIL010': {'start_date': '3.8.2025 10:48', 'end_date': '1.9.2025 12:00'},
-        'TRAIL011': {'start_date': '14.8.2025 14:00', 'end_date': '21.9.2025 13:00'},
-        'TRAIL012': {'start_date': '28.8.2025 14:00', 'end_date': '25.9.2025 10:00'},
-        'TRAIL013': {'start_date': '31.8.2025 12:00', 'end_date': '25.9.2025 12:00'},
-    }
-    fmt = "%d.%m.%Y %H:%M"
-    trail_dates_ts = {
-        k: {
-            'start_date': datetime.strptime(v['start_date'], fmt),
-            'end_date': datetime.strptime(v['end_date'], fmt),
+    from utils import load_participant_dates
+
+    trail_dates = load_participant_dates(r"data/embrace_plus/participants_extra_data/participant_data_periods.xlsx")
+    
+    trail_dates_ts = {}
+    for k, v in trail_dates.items():
+        # Handle cases where dates might be strings or Timestamp objects
+        s_date = v['start_date']
+        e_date = v['end_date']
+        
+        # Ensure conversion to datetime
+        if isinstance(s_date, str):
+             # Try common formats or let pd.to_datetime handle it
+             s_date = pd.to_datetime(s_date, dayfirst=True)
+        if isinstance(e_date, str):
+             e_date = pd.to_datetime(e_date, dayfirst=True)
+             
+        trail_dates_ts[k] = {
+            'start_date': s_date,
+            'end_date': e_date,
         }
-        for k, v in trail_dates.items()
-    }
 
     time_slot_windows_before_list = [35, 30, 25]
     time_slot_windows_after_list = [5, 10, 15]
@@ -385,9 +390,10 @@ if __name__ == '__main__':
     standard_scaling = False
     multiclassification = False
 
-    tags_path = r'../data\embrace_plus\participants_extra_data\valid_tags'
-    data_path = r'C:\Users\GONY\Desktop\Booggii\data'
-    chunked_data_path = fr"C:\Users\GONY\Desktop\Booggii\processed_data\old_classification_tod_features_{window_minutes}min_{step_minutes}step{'_normalized_' if normalize else ''}"
+    tags_path = r'data/embrace_plus/participants_extra_data/valid_tags/auto_modified_tags'
+    # tags_path = r'data\embrace_plus\participants_extra_data\valid_tags'
+    data_path = r'data\embrace_plus\participant_data'
+    chunked_data_path = f"data\embrace_plus\participant_processed_data\old_classification_tod_features{window_minutes}min_{step_minutes}step{'_normalized_' if normalize else ''}"
 
     if os.path.exists(chunked_data_path):
         # if False:
@@ -422,15 +428,17 @@ if __name__ == '__main__':
 
         os.makedirs(chunked_data_path, exist_ok=True)
 
+
         positive_data.to_pickle(
             chunked_data_path + rf'\positive_data_{window_minutes}min_{step_minutes}step.pkl')
         negative_data.to_pickle(
             chunked_data_path + rf'\negative_data_{window_minutes}min_{step_minutes}step.pkl')
 
     now = datetime.now()
+
     time_str = now.strftime("%Y-%m-%d_%H-%M")
     time_str = "new__code_XGBoost_withpulse" + ('multiclassification_' if multiclassification else '') + time_str
-    output_dir = os.path.join(r'C:\Users\GONY\Desktop\Booggii\results\rnn_output', 'results', time_str)
+    output_dir = os.path.join(r'xgboost_output\results\xgboost_output', 'results', time_str)
     os.makedirs(output_dir, exist_ok=True)
 
     columns = ['pulse_rate_bpm_mean',
