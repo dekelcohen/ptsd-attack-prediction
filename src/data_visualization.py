@@ -4,61 +4,56 @@ from pathlib import Path
 
 import pandas as pd
 import pytz
+import neurokit2 as nk
 from bokeh.layouts import column, gridplot
 from bokeh.models import DatetimeTickFormatter
 from bokeh.models import HoverTool
 from bokeh.plotting import figure, show
 from matplotlib import pyplot as plt
 from pandas import DataFrame
+from sklearn.preprocessing import StandardScaler
+import seaborn as sns
+import numpy as np
+
+import avro_utils
 
 
-class Biomarker(Enum):
-    Pr = "pulse-rate"
-    Eda = "eda"  # Electrodermal Activity
-    AccStd = "accelerometers-std"  # Accelerometer Magnitude Standard Deviation
-    Prv = "prv"  # Pulse Rate Variability
-    Met = "met"  # Metabolic Equivalent of Task
-    Temp = "temperature"  # Skin Temperature in °C
-
-
-biomarker_value_names = {
-    Biomarker.Pr: "pulse_rate_bpm",
-    Biomarker.Eda: "eda_scl_usiemens",
-    Biomarker.AccStd: "accelerometers_std_g",
-    Biomarker.Prv: "prv_rmssd_ms",
-    Biomarker.Met: "met",
-    Biomarker.Temp: "temperature_celsius"
-}
-
-# color_hex = "#FF0000"  # red
-# color_rgb = "rgb(0, 255, 0)"  # green
-# color_rgba = "rgba(0, 0, 255, 0.5)"  # semi-transparent blue
-# color_name = "blue"  # blue
-
-biomarker_colors = {
-    Biomarker.Pr: "crimson",
-    Biomarker.Eda: "darkorange",
-    Biomarker.AccStd: "aqua",
-    Biomarker.Prv: "blue",
-    Biomarker.Met: "green",
-    Biomarker.Temp: "yellow",
-}
+from biomarkers import Biomarker, biomarker_value_names, biomarker_colors
 
 
 def main():
 
-    user_id = "TRAIL005"
-    trial_starting_date = "2025-05-14 11:56:00"
+    # user_id = "TRAIL005"
+    # trial_starting_date = "2025-05-14 11:56:00"
+    # user_id = "TRAIL009"
+    # trial_starting_date = "2025-07-31 14:50:00"
+    # user_id = "TRAIL017"
+    # trial_starting_date = "2025-12-07 08:30:00"
+    # user_id = "TRAIL004"
+    # trial_starting_date = "2025-04-27 15:00:00"
+    # user_id = "TRAIL004"
+    # trial_starting_date = "2025-04-27 15:00:00"
+    # user_id = "TRAIL008"
+    # trial_starting_date = "2025-07-10 14:50:00"
+    user_id = "TRAIL10"
+    trial_starting_date = "2025-08-03 10:48:00"
+
+
+
     jerusalem_tz = pytz.timezone('Asia/Jerusalem')
     data_root_dir = Path("data/embrace_plus/")
 
-    biomarker_names = [Biomarker.Pr, Biomarker.Eda, Biomarker.AccStd, Biomarker.Prv, Biomarker.Met, Biomarker.Temp]
-    biomarker_dfs, filtered_df = prepare_data(biomarker_names, data_root_dir, jerusalem_tz, trial_starting_date,
-                                              user_id, override=False)
+    biomarker_names = [Biomarker.Pr, Biomarker.AccStd, Biomarker.Temp,
+                       Biomarker.EdaPhasic, Biomarker.EdaTonic, Biomarker.Prv, Biomarker.Met, Biomarker.RR]
+    biomarker_dfs, filtered_df = prepare_data_and_tags(biomarker_names, data_root_dir, jerusalem_tz, trial_starting_date,
+                                                       user_id, override=False)
 
-    visualize_data(biomarker_dfs, filtered_df, split=True)
-    visualize_events(biomarker_dfs, filtered_df)
-    visualize_statistics(biomarker_dfs)
+    # anomaly_df = detect_anomalies(biomarker_dfs)
+    # print(f"Detected {len(anomaly_df)} anomaly minutes.")
+
+    # visualize_data(biomarker_dfs, filtered_df, anomaly_events=anomaly_df, split=True)
+    visualize_events(biomarker_dfs, filtered_df, anomaly_events=None, time_delta=pd.Timedelta(hours=6))
+    # visualize_statistics(biomarker_dfs)
 
 
 def visualize_statistics(biomarker_dfs):
@@ -84,27 +79,134 @@ def visualize_statistics(biomarker_dfs):
     plt.show()
 
 
-def visualize_events(biomarker_dfs, filtered_df, time_delta=pd.Timedelta(hours=1)):
+def visualize_events(biomarker_dfs, filtered_df, anomaly_events=None, time_delta=pd.Timedelta(hours=1)):
     event_plots = []
     for event_time in filtered_df['datetime']:
         filtered_biomarker_dfs = {}
+        start_time = event_time - time_delta
+        end_time = event_time + time_delta
+
         for biomarker_name, biomarker_df in biomarker_dfs.items():
-            start_time = event_time - time_delta
-            end_time = event_time + time_delta
             window_data = biomarker_df[
                 (biomarker_df['datetime'] >= start_time) & (biomarker_df['datetime'] <= end_time)]
 
             if not window_data.empty:
                 filtered_biomarker_dfs[biomarker_name] = window_data
             else:
-                print(
-                    f"no data for event in {event_time} in biomarker {biomarker_name} with time delta of {time_delta}")
+                # print(f"no data for event in {event_time} in biomarker {biomarker_name} with time delta of {time_delta}")
+                pass
+        
+        # Filter anomalies for this window
+        window_anomalies = None
+        if anomaly_events is not None and not anomaly_events.empty:
+             window_anomalies = anomaly_events[
+                (anomaly_events['datetime'] >= start_time) & (anomaly_events['datetime'] <= end_time)
+             ]
 
-        event_plots.append(visualize_data(filtered_biomarker_dfs, event_time, split=False))
+        event_plots.append(visualize_data(filtered_biomarker_dfs, event_time, anomaly_events=window_anomalies, split=False))
     show(gridplot(event_plots, ncols=4, sizing_mode="stretch_width"))
 
 
-def visualize_data(biomarker_dfs, events, split=True):
+from sklearn.ensemble import IsolationForest
+
+def detect_anomalies(biomarker_dfs):
+    # Combine dataframes to align timestamps
+    # We will prioritize EDA and Phasic/Tonic if available, or just common index
+    dfs_to_merge = []
+    for name, df in biomarker_dfs.items():
+        if not df.empty:
+             # Rename value column to biomarker name to avoid collisions
+             temp_df = df.set_index('datetime').rename(columns={biomarker_value_names[name]: name.value})
+             # Resample to 1min or kept original? data_visualization seems to use original or varying freq.
+             # We should probably resample to a common frequency for alignment, e.g., 1s or 1min.
+             # Let's try to match on existing timestamps (inner join) or nearest.
+             # Given the data is likely high frequency for some (EDA 4Hz) and low for others (HR 1Hz),
+             # and processed data in data_prep creates per-minute or high freq.
+             
+             # Let's resample to 1 minute for anomaly detection to be robust and fast
+             temp_df = temp_df.resample('1min').mean()
+             dfs_to_merge.append(temp_df)
+    
+    if not dfs_to_merge:
+        return pd.DataFrame()
+
+    combined_df = pd.concat(dfs_to_merge, axis=1).dropna()
+    
+    if combined_df.empty:
+        return pd.DataFrame()
+
+    # Train Isolation Forest
+    # clf = IsolationForest(n_estimators=300, max_samples=256, contamination=0.05, random_state=42)
+    # Fit and predict
+    # 1 for inliers, -1 for outliers
+    # preds = clf.fit_predict(combined_df)
+    # anomalies = combined_df[preds == -1]
+
+    tuned_results = tune_isolation_forest(combined_df)
+    anomalies = tuned_results[tuned_results['predicted_stress'] == True]
+    return anomalies.reset_index()[['datetime']]
+
+
+def tune_isolation_forest(features_df):
+    """
+     tunes Isolation Forest by analyzing the distribution of anomaly scores
+     rather than guessing a contamination percentage.
+    """
+
+    # 1. Feature Scaling
+    # Isolation Forest is somewhat robust to scale, but scaling helps
+    # when combining units like ms (HRV) and count (EDA).
+    scaler = StandardScaler()
+    X = scaler.fit_transform(features_df)
+
+    # 2. Train Model (Optimized for Stability)
+    # We use n_estimators=300 for stability and max_samples=256 to prevent swamping.
+    iso_forest = IsolationForest(
+    n_estimators = 300,
+    max_samples = 256,
+    contamination = 0.5,
+    random_state = 42,
+    n_jobs = -1
+
+    )
+    iso_forest.fit(X)
+
+    # 3. Get Raw Anomaly Scores (The "Tuning" Step)
+    # The decision_function returns negative values for outliers, positive for inliers.
+    # We invert this so higher score = more anomalous (more stressed).
+    raw_scores = -1 * iso_forest.decision_function(X)
+    features_df['stress_score'] = raw_scores
+
+    # 4. Visualization for Threshold Tuning
+    plt.figure(figsize=(10, 6))
+    sns.histplot(raw_scores, bins=50, kde=True, color='blue', alpha=0.6)
+
+    # Calculate Statistical Thresholds
+    # Option A: 3 Sigma (very conservative, catches only extreme panic)
+    thresh_3std = np.mean(raw_scores) + 3 * np.std(raw_scores)
+
+    # Option B: IQR Rule (robust to outliers, recommended for physiological data)
+    Q1 = np.percentile(raw_scores, 25)
+    Q3 = np.percentile(raw_scores, 75)
+    IQR = Q3 - Q1
+    thresh_iqr = Q3 + 1.5 * IQR
+
+    plt.axvline(thresh_3std, color='red', linestyle='--', label=f'3-Sigma Threshold ({thresh_3std:.2f})')
+    plt.axvline(thresh_iqr, color='green', linestyle='--', label=f'IQR Threshold ({thresh_iqr:.2f})')
+
+    plt.title('Distribution of Stress Scores: Where is the Cutoff?')
+    plt.xlabel('Anomaly Score (Higher = More Stressed)')
+    plt.legend()
+    # plt.show()
+
+    print(f"Recommended Threshold (IQR Method): {thresh_iqr:.3f}")
+
+    # Apply Threshold
+    features_df['predicted_stress'] = features_df['stress_score'] > thresh_iqr
+    return features_df
+
+
+def visualize_data(biomarker_dfs, events, anomaly_events=None, split=True):
     fig_big = figure(sizing_mode="stretch_width", x_axis_type='datetime', background_fill_color="WhiteSmoke")
     fig_big.xaxis.axis_label = 'Time'
     fig_big.xaxis.formatter = DatetimeTickFormatter(days="%d/%m",
@@ -133,6 +235,28 @@ def visualize_data(biomarker_dfs, events, split=True):
         line_color="red",
         legend_label="events",
     )
+    
+    # Visualize Anomalies
+    if anomaly_events is not None and not anomaly_events.empty:
+        localized_anomalies = anomaly_events["datetime"].dt.tz_localize(None)
+        # Using a width for vspan or just vertical lines. vspan requires width/x/width.
+        # Ideally we want a shaded region. vspan takes 'x' which are coordinates.
+        # But we only have single timestamps. Let's assume they are minutes.
+        # We can map each anomaly timestamp to a region [t, t+1min]
+        # Or just use vspan with line_width > 1
+        
+        # Creating a span for each anomaly might be heavy if there are many.
+        # Let's try vbar with infinite height? No, vspan is for infinite height.
+        # Using vspan with multiple x coords is good.
+        
+        # For better visibility, let's use a distinct color span
+        fig_big.vspan(
+            x=localized_anomalies,
+            line_color="orange",
+            line_width=2,
+            legend_label="anomalies",
+            alpha=0.5
+        )
 
     tooltips = [
         ('datetime', '@x{%Y-%m-%d %H:%M:%S}'),
@@ -147,6 +271,16 @@ def visualize_data(biomarker_dfs, events, split=True):
             line_color="red",
             legend_label="event",
         )
+        
+        if anomaly_events is not None and not anomaly_events.empty:
+             fig_small.vspan(
+                x=localized_anomalies,
+                line_color="orange",
+                line_width=2,
+                legend_label="anomalies",
+                alpha=0.5
+            )
+            
         fig_small.add_tools(HoverTool(tooltips=tooltips,
                                       formatters={'@x': 'datetime'}))
         layout = column(fig_big, fig_small, spacing=10, sizing_mode="stretch_both")
@@ -155,49 +289,123 @@ def visualize_data(biomarker_dfs, events, split=True):
     return column(fig_big, spacing=10, sizing_mode="stretch_both")
 
 
-def prepare_data(biomarker_names, data_root_dir, jerusalem_tz, trial_starting_date,
-                 user_id, override=False):
-    participant_data_dir = data_root_dir.joinpath("participant_data")
-    participant_processed_data_dir = data_root_dir.joinpath("participant_processed_data")
-    trial_starting_datetime = pd.to_datetime(trial_starting_date).tz_localize('Asia/Jerusalem')
-    biomarker_dfs = {biomarker_name: DataFrame() for biomarker_name in biomarker_names}
-    all_tags_df = DataFrame()
-    all_hr_df = DataFrame()
-    all_eda_df = DataFrame()
-    all_temp_df = DataFrame()
-    for date_dir in os.listdir(participant_data_dir):
-        date_path = participant_data_dir.joinpath(date_dir)
-        # if date_dir != "2025-04-21":
-        #     continue
-        for user_dir in os.listdir(date_path):
-            if user_dir.startswith(user_id):
-                print(f"processing user {user_dir} on date {date_dir}")
-                user_processed_data_dir = participant_processed_data_dir.joinpath(user_dir)
-                if not user_processed_data_dir.exists():
-                    user_processed_data_dir.mkdir()
-
-                user_path = date_path.joinpath(user_dir)
-                biomarkers_path = user_path.joinpath("digital_biomarkers/aggregated_per_minute/")
-                for biomarker_file in os.listdir(biomarkers_path):
-                    for biomarker_name in biomarker_names:
-                        if biomarker_file.endswith(biomarker_name.value + ".csv"):
-                            df = pd.read_csv(biomarkers_path.joinpath(biomarker_file), sep=',')
-                            df['datetime'] = pd.to_datetime(df['timestamp_iso'],
-                                                                utc=True).map(lambda x: x.tz_convert('Asia/Jerusalem'))
-                            df2 = df.dropna(subset=[biomarker_value_names[biomarker_name]])
-                            df2 = df2[["datetime", biomarker_value_names[biomarker_name]]]
-                            biomarker_dfs[biomarker_name] = pd.concat([biomarker_dfs[biomarker_name], df2])
+def prepare_data_and_tags(biomarker_names, data_root_dir, jerusalem_tz, trial_starting_date,
+                          user_id, override=False):
+    biomarker_dfs = prepare_data(biomarker_names, data_root_dir, jerusalem_tz, override, trial_starting_date, user_id)
 
     valid_tags_df = pd.read_csv(
         "data/embrace_plus/participants_extra_data/valid_tags/" + user_id + "_valid_tags.csv", sep=',')
     if not valid_tags_df.empty:
         # Notice: manually replace in valid tags csv the " IDT" with "+03:00"
-        valid_tags_df["datetime"] = pd.to_datetime(valid_tags_df['timestamp']).dt.tz_convert(
+        # CLEANUP: remove " IDT" and localize manualy
+        valid_tags_df["timestamp"] = valid_tags_df["new_timestamp"].astype(str).str.replace(" IDT", "").str.replace(" IST", "")
+        valid_tags_df["datetime"] = pd.to_datetime(valid_tags_df['timestamp']).dt.tz_localize(
             jerusalem_tz)  # Convert to Jerusalem time
 
     return biomarker_dfs, valid_tags_df
 
 
+def prepare_data(biomarker_names, data_root_dir, jerusalem_tz, override, trial_starting_date, user_id):
+    participant_data_dir = data_root_dir.joinpath("participant_data")
+    participant_processed_data_dir = data_root_dir.joinpath("participant_processed_data")
+    cache_file = participant_processed_data_dir.joinpath(f"{user_id}_biomarker_dfs.pkl")
+    if not override and cache_file.exists():
+        print(f"Loading processed data from cache: {cache_file}")
+        biomarker_dfs = pd.read_pickle(cache_file)
+    else:
+        trial_starting_datetime = pd.to_datetime(trial_starting_date).tz_localize('Asia/Jerusalem')
+        biomarker_dfs = {biomarker_name: DataFrame() for biomarker_name in biomarker_names}
+        all_tags_df = DataFrame()
+        all_hr_df = DataFrame()
+        all_eda_df = DataFrame()
+        all_temp_df = DataFrame()
+        for date_dir in os.listdir(participant_data_dir):
+            date_path = participant_data_dir.joinpath(date_dir)
+            # if date_dir != "2025-04-21":
+            #     continue
+            for user_dir in os.listdir(date_path):
+                if user_dir.startswith(user_id):
+                    print(f"processing user {user_dir} on date {date_dir}")
+                    user_processed_data_dir = participant_processed_data_dir.joinpath(user_dir)
+                    if not user_processed_data_dir.exists():
+                        user_processed_data_dir.mkdir()
+
+                    user_path = date_path.joinpath(user_dir)
+                    biomarkers_path = user_path.joinpath("digital_biomarkers/aggregated_per_minute/")
+                    for biomarker_file in os.listdir(biomarkers_path):
+                        for biomarker_name in biomarker_names:
+                            if biomarker_file.endswith(biomarker_name.value + ".csv"):
+                                df = pd.read_csv(biomarkers_path.joinpath(biomarker_file), sep=',')
+                                df['datetime'] = pd.to_datetime(df['timestamp_iso'],
+                                                                utc=True).map(lambda x: x.tz_convert('Asia/Jerusalem'))
+                                df2 = df.dropna(subset=[biomarker_value_names[biomarker_name]])
+                                df2 = df2[["datetime", biomarker_value_names[biomarker_name]]]
+                                biomarker_dfs[biomarker_name] = pd.concat([biomarker_dfs[biomarker_name], df2])
+
+                    # Process Raw EDA if needed
+                    if Biomarker.EdaPhasic in biomarker_names or Biomarker.EdaTonic in biomarker_names:
+                        raw_eda_dfs = []
+                        raw_data_dir = user_path.joinpath("raw_data/v6")
+                        if raw_data_dir.exists():
+                            print(f"Processing raw EDA for {user_dir}...")
+                            for avro_file in sorted(os.listdir(raw_data_dir)):
+                                if avro_file.endswith(".avro"):
+                                    try:
+                                        eda_df, _, _ = avro_utils.generate_dataframes_from_avro(
+                                            raw_data_dir.joinpath(avro_file), jerusalem_tz)
+                                        # median_val = eda_df['value'].median()
+                                        # if pd.notna(median_val) and median_val != 0:
+                                        #     eda_df['value'] = eda_df['value'] / median_val
+                                        eda_df['value'] = eda_df['value']
+                                        if not eda_df.empty:
+                                            raw_eda_dfs.append(eda_df)
+                                    except Exception as e:
+                                        print(f"Error processing {avro_file}: {e}")
+
+                            if raw_eda_dfs:
+                                full_eda_df = pd.concat(raw_eda_dfs).sort_values('datetime').drop_duplicates('datetime')
+                                # NeuroKit2 processing
+                                try:
+                                    # Resample to a consistent rate if needed, but eda_process handles it usually if sampling_rate is provided.
+                                    # However, our df has timestamps. nk.eda_process expects a signal.
+                                    # We need to infer sampling rate or just pass the signal values.
+                                    # EmbracePlus EDA is usually 4Hz (check?), but avro_utils extracts it.
+                                    # Let's assume constant sampling rate from the first file or just use the extracted times.
+                                    # nk.eda_process(eda_signal, sampling_rate=...)
+
+                                    # Calculating sampling rate
+                                    if len(full_eda_df) > 1:
+                                        time_diffs = full_eda_df['datetime'].diff().dt.total_seconds().dropna()
+                                        fs = 1 / time_diffs.median()
+
+                                        signals, info = nk.eda_process(full_eda_df['value'], sampling_rate=fs)
+
+                                        # signals contains EDA_Raw, EDA_Clean, EDA_Phasic, EDA_Tonic, etc.
+                                        # Map back to datetime
+                                        # signals length should match input
+
+                                        if Biomarker.EdaPhasic in biomarker_names:
+                                            phasic_df = pd.DataFrame({
+                                                'datetime': full_eda_df['datetime'].reset_index(drop=True),
+                                                biomarker_value_names[Biomarker.EdaPhasic]: signals['EDA_Phasic'].values
+                                            })
+                                            biomarker_dfs[Biomarker.EdaPhasic] = pd.concat(
+                                                [biomarker_dfs[Biomarker.EdaPhasic], phasic_df])
+
+                                        if Biomarker.EdaTonic in biomarker_names:
+                                            tonic_df = pd.DataFrame({
+                                                'datetime': full_eda_df['datetime'].reset_index(drop=True),
+                                                biomarker_value_names[Biomarker.EdaTonic]: signals['EDA_Tonic'].values
+                                            })
+                                            biomarker_dfs[Biomarker.EdaTonic] = pd.concat(
+                                                [biomarker_dfs[Biomarker.EdaTonic], tonic_df])
+                                except Exception as e:
+                                    print(f"Error in NeuroKit2 processing: {e}")
+
+        # Save to cache
+        print(f"Saving processed data to cache: {cache_file}")
+        pd.to_pickle(biomarker_dfs, cache_file)
+    return biomarker_dfs
 
 
 if __name__ == '__main__':

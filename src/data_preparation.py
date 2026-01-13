@@ -2,6 +2,7 @@ import os
 from collections import defaultdict, deque
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -792,7 +793,7 @@ def prepare_biomarkers_data(patients_dict, tags_path, data_path, time='15min', t
             if patient in patients_dict.keys():
                 tags = pd.read_csv(os.path.join(tags_path, file))
                 # tags = tags[tags['eventType'] != 'other']
-                tags = df_timestamp_to_israel_time(tags, timestamp_col='timestamp')
+                tags = df_timestamp_to_israel_time(tags, timestamp_col='new_timestamp')
                 total_number_of_tags += len(tags)
                 total_number_of_tags_per_patient[patient] = len(tags)
                 data = pd.DataFrame()
@@ -878,7 +879,7 @@ def _mad(x: np.ndarray) -> float:
     return float(np.median(np.abs(x - med)))
 
 
-def _tod_slot(ts: pd.Timestamp, tz: str | None, slot_minutes: int) -> int:
+def _tod_slot(ts: pd.Timestamp, tz: Optional[str], slot_minutes: int) -> int:
     """
     Map timestamp to a time-of-day slot index 0..(1440/slot_minutes - 1) in the given timezone.
     """
@@ -891,7 +892,7 @@ def _tod_slot(ts: pd.Timestamp, tz: str | None, slot_minutes: int) -> int:
     return int(minutes // slot_minutes)
 
 
-def _local_date(ts: pd.Timestamp, tz: str | None) -> pd.Timestamp.date:
+def _local_date(ts: pd.Timestamp, tz: Optional[str]) -> pd.Timestamp.date:
     """
     Get the local calendar date for ts in tz.
     """
@@ -1037,7 +1038,7 @@ def make_time_windows(
     # --- NEW: time-of-day features params (all optional) ---
     enable_tod: bool = True,
     tod_slot_minutes: int = 15,
-    tz_for_tod: str | None = "Asia/Jerusalem",
+    tz_for_tod: Optional[str] = "Asia/Jerusalem",
     tod_min_history: int = 5,
     tod_history_len: int = 56,        # ~8 weeks of daily coverage
     keep_same_yday: bool = True,
