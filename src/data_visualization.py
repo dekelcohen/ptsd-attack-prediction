@@ -51,7 +51,8 @@ def main():
     anomaly_df = detect_anomalies(biomarker_dfs)
 
     # visualize_data(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_events=anomaly_df, split=True)
-    visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_events=anomaly_df, time_delta=pd.Timedelta(hours=6))
+    normalize = True
+    visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_events=anomaly_df, time_delta=pd.Timedelta(hours=6), normalize=normalize)
     # visualize_statistics(biomarker_dfs)
 
 
@@ -78,7 +79,7 @@ def visualize_statistics(biomarker_dfs):
     plt.show()
 
 
-def visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_events=None, time_delta=pd.Timedelta(hours=1)):
+def visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_events=None, time_delta=pd.Timedelta(hours=1), normalize=False):
     event_plots = []
     
     if not raw_tags_df.empty:
@@ -93,8 +94,7 @@ def visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_event
                  modified_event_time = modified_tags_df.iloc[i]['datetime']
 
             filtered_biomarker_dfs = {}
-            # Define window around the RAW event time (or should we cover both? usually raw is the reference)
-            # Assuming raw event time is the center of the window of interest.
+            # Define window around the RAW event time
             start_time = raw_event_time - time_delta
             end_time = raw_event_time + time_delta
 
@@ -104,8 +104,10 @@ def visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_event
 
                 if not window_data.empty:
                     filtered_biomarker_dfs[biomarker_name] = window_data
+                elif normalize:
+                     # For normalized plots, we might want to ensure we don't break if empty
+                     pass
                 else:
-                    # print(f"no data for event in {event_time} in biomarker {biomarker_name} with time delta of {time_delta}")
                     pass
             
             # Filter anomalies for this window
@@ -115,7 +117,7 @@ def visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_event
                     (anomaly_events['datetime'] >= start_time) & (anomaly_events['datetime'] <= end_time)
                  ]
                  
-            event_plots.append(visualize_data(filtered_biomarker_dfs, raw_event_time, modified_event_time, anomaly_events=window_anomalies, split=False))
+            event_plots.append(visualize_data(filtered_biomarker_dfs, raw_event_time, modified_event_time, anomaly_events=window_anomalies, split=False, normalize=normalize))
     
     show(gridplot(event_plots, ncols=4, sizing_mode="stretch_width"))
 
@@ -219,7 +221,7 @@ def tune_isolation_forest(features_df):
     return features_df
 
 
-def visualize_data(biomarker_dfs, raw_events, modified_events, anomaly_events=None, split=True):
+def visualize_data(biomarker_dfs, raw_events, modified_events, anomaly_events=None, split=True, normalize=False):
     fig_big = figure(sizing_mode="stretch_width", x_axis_type='datetime', background_fill_color="WhiteSmoke")
     fig_big.xaxis.axis_label = 'Time'
     fig_big.xaxis.formatter = DatetimeTickFormatter(days="%d/%m",
@@ -233,11 +235,23 @@ def visualize_data(biomarker_dfs, raw_events, modified_events, anomaly_events=No
                                                           minutes="%H:%M")
     for name, df in biomarker_dfs.items():
         proper_size_fig = fig_big
-        if split and df[biomarker_value_names[name]].max() < 50:
+        
+        # Prepare data for plotting
+        plot_df = df.copy()
+        y_col = biomarker_value_names[name]
+        
+        if normalize and not plot_df.empty:
+            scaler = StandardScaler()
+            # Reshape for scalar
+            values = plot_df[y_col].values.reshape(-1, 1)
+            plot_df[y_col] = scaler.fit_transform(values)
+            
+        if split and not normalize and df[biomarker_value_names[name]].max() < 50:
             proper_size_fig = fig_small
+
         proper_size_fig.line(
-            x=df["datetime"].dt.tz_localize(None),
-            y=df[biomarker_value_names[name]],
+            x=plot_df["datetime"].dt.tz_localize(None),
+            y=plot_df[biomarker_value_names[name]],
             legend_label=name.value,
             color=biomarker_colors[name]
         )
