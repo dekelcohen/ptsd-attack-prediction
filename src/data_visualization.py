@@ -45,14 +45,13 @@ def main():
 
     biomarker_names = [Biomarker.Pr, Biomarker.AccStd, Biomarker.Temp,
                        Biomarker.EdaPhasic, Biomarker.EdaTonic, Biomarker.Prv, Biomarker.Met, Biomarker.RR]
-    biomarker_dfs, filtered_df = prepare_data_and_tags(biomarker_names, data_root_dir, jerusalem_tz, trial_starting_date,
+    biomarker_dfs, raw_tags_df, modified_tags_df = prepare_data_and_tags(biomarker_names, data_root_dir, jerusalem_tz, trial_starting_date,
                                                        user_id, override=False)
 
-    # anomaly_df = detect_anomalies(biomarker_dfs)
-    # print(f"Detected {len(anomaly_df)} anomaly minutes.")
+    anomaly_df = detect_anomalies(biomarker_dfs)
 
-    # visualize_data(biomarker_dfs, filtered_df, anomaly_events=anomaly_df, split=True)
-    visualize_events(biomarker_dfs, filtered_df, anomaly_events=None, time_delta=pd.Timedelta(hours=6))
+    # visualize_data(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_events=anomaly_df, split=True)
+    visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_events=anomaly_df, time_delta=pd.Timedelta(hours=6))
     # visualize_statistics(biomarker_dfs)
 
 
@@ -79,31 +78,45 @@ def visualize_statistics(biomarker_dfs):
     plt.show()
 
 
-def visualize_events(biomarker_dfs, filtered_df, anomaly_events=None, time_delta=pd.Timedelta(hours=1)):
+def visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_events=None, time_delta=pd.Timedelta(hours=1)):
     event_plots = []
-    for event_time in filtered_df['datetime']:
-        filtered_biomarker_dfs = {}
-        start_time = event_time - time_delta
-        end_time = event_time + time_delta
+    
+    if not raw_tags_df.empty:
+        for i in range(len(raw_tags_df)):
+            if 'datetime' not in raw_tags_df.columns:
+                continue
+                
+            raw_event_time = raw_tags_df.iloc[i]['datetime']
+            
+            modified_event_time = None
+            if not modified_tags_df.empty and i < len(modified_tags_df) and 'datetime' in modified_tags_df.columns:
+                 modified_event_time = modified_tags_df.iloc[i]['datetime']
 
-        for biomarker_name, biomarker_df in biomarker_dfs.items():
-            window_data = biomarker_df[
-                (biomarker_df['datetime'] >= start_time) & (biomarker_df['datetime'] <= end_time)]
+            filtered_biomarker_dfs = {}
+            # Define window around the RAW event time (or should we cover both? usually raw is the reference)
+            # Assuming raw event time is the center of the window of interest.
+            start_time = raw_event_time - time_delta
+            end_time = raw_event_time + time_delta
 
-            if not window_data.empty:
-                filtered_biomarker_dfs[biomarker_name] = window_data
-            else:
-                # print(f"no data for event in {event_time} in biomarker {biomarker_name} with time delta of {time_delta}")
-                pass
-        
-        # Filter anomalies for this window
-        window_anomalies = None
-        if anomaly_events is not None and not anomaly_events.empty:
-             window_anomalies = anomaly_events[
-                (anomaly_events['datetime'] >= start_time) & (anomaly_events['datetime'] <= end_time)
-             ]
+            for biomarker_name, biomarker_df in biomarker_dfs.items():
+                window_data = biomarker_df[
+                    (biomarker_df['datetime'] >= start_time) & (biomarker_df['datetime'] <= end_time)]
 
-        event_plots.append(visualize_data(filtered_biomarker_dfs, event_time, anomaly_events=window_anomalies, split=False))
+                if not window_data.empty:
+                    filtered_biomarker_dfs[biomarker_name] = window_data
+                else:
+                    # print(f"no data for event in {event_time} in biomarker {biomarker_name} with time delta of {time_delta}")
+                    pass
+            
+            # Filter anomalies for this window
+            window_anomalies = None
+            if anomaly_events is not None and not anomaly_events.empty:
+                 window_anomalies = anomaly_events[
+                    (anomaly_events['datetime'] >= start_time) & (anomaly_events['datetime'] <= end_time)
+                 ]
+                 
+            event_plots.append(visualize_data(filtered_biomarker_dfs, raw_event_time, modified_event_time, anomaly_events=window_anomalies, split=False))
+    
     show(gridplot(event_plots, ncols=4, sizing_mode="stretch_width"))
 
 
@@ -206,7 +219,7 @@ def tune_isolation_forest(features_df):
     return features_df
 
 
-def visualize_data(biomarker_dfs, events, anomaly_events=None, split=True):
+def visualize_data(biomarker_dfs, raw_events, modified_events, anomaly_events=None, split=True):
     fig_big = figure(sizing_mode="stretch_width", x_axis_type='datetime', background_fill_color="WhiteSmoke")
     fig_big.xaxis.axis_label = 'Time'
     fig_big.xaxis.formatter = DatetimeTickFormatter(days="%d/%m",
@@ -228,28 +241,36 @@ def visualize_data(biomarker_dfs, events, anomaly_events=None, split=True):
             legend_label=name.value,
             color=biomarker_colors[name]
         )
-    localized_events = events["datetime"].dt.tz_localize(None) if isinstance(events, DataFrame) else [
-        events.tz_localize(None)]
-    fig_big.vspan(
-        x=localized_events,
-        line_color="red",
-        legend_label="events",
-    )
+    
+    localized_raw_events = []
+    if isinstance(raw_events, DataFrame) and not raw_events.empty:
+         localized_raw_events = raw_events["datetime"].dt.tz_localize(None)
+    elif isinstance(raw_events, pd.Timestamp):
+         localized_raw_events = [raw_events.tz_localize(None)]
+         
+    localized_mod_events = []
+    if isinstance(modified_events, DataFrame) and not modified_events.empty:
+         localized_mod_events = modified_events["datetime"].dt.tz_localize(None)
+    elif isinstance(modified_events, pd.Timestamp):
+         localized_mod_events = [modified_events.tz_localize(None)]
+
+    if len(localized_raw_events) > 0:
+        fig_big.vspan(
+            x=localized_raw_events,
+            line_color="red",
+            legend_label="raw events",
+        )
+    
+    if len(localized_mod_events) > 0:
+        fig_big.vspan(
+            x=localized_mod_events,
+            line_color="green",
+            legend_label="modified events",
+        )
     
     # Visualize Anomalies
     if anomaly_events is not None and not anomaly_events.empty:
         localized_anomalies = anomaly_events["datetime"].dt.tz_localize(None)
-        # Using a width for vspan or just vertical lines. vspan requires width/x/width.
-        # Ideally we want a shaded region. vspan takes 'x' which are coordinates.
-        # But we only have single timestamps. Let's assume they are minutes.
-        # We can map each anomaly timestamp to a region [t, t+1min]
-        # Or just use vspan with line_width > 1
-        
-        # Creating a span for each anomaly might be heavy if there are many.
-        # Let's try vbar with infinite height? No, vspan is for infinite height.
-        # Using vspan with multiple x coords is good.
-        
-        # For better visibility, let's use a distinct color span
         fig_big.vspan(
             x=localized_anomalies,
             line_color="orange",
@@ -266,11 +287,18 @@ def visualize_data(biomarker_dfs, events, anomaly_events=None, split=True):
                                 formatters={'@x': 'datetime'}))
     fig_big
     if split:
-        fig_small.vspan(
-            x=localized_events,
-            line_color="red",
-            legend_label="event",
-        )
+        if len(localized_raw_events) > 0:
+            fig_small.vspan(
+                x=localized_raw_events,
+                line_color="red",
+                legend_label="raw event",
+            )
+        if len(localized_mod_events) > 0:
+            fig_small.vspan(
+                x=localized_mod_events,
+                line_color="green",
+                legend_label="modified event",
+            )
         
         if anomaly_events is not None and not anomaly_events.empty:
              fig_small.vspan(
@@ -293,16 +321,41 @@ def prepare_data_and_tags(biomarker_names, data_root_dir, jerusalem_tz, trial_st
                           user_id, override=False):
     biomarker_dfs = prepare_data(biomarker_names, data_root_dir, jerusalem_tz, override, trial_starting_date, user_id)
 
-    valid_tags_df = pd.read_csv(
-        "data/embrace_plus/participants_extra_data/valid_tags/" + user_id + "_valid_tags.csv", sep=',')
-    if not valid_tags_df.empty:
-        # Notice: manually replace in valid tags csv the " IDT" with "+03:00"
-        # CLEANUP: remove " IDT" and localize manualy
-        valid_tags_df["timestamp"] = valid_tags_df["new_timestamp"].astype(str).str.replace(" IDT", "").str.replace(" IST", "")
-        valid_tags_df["datetime"] = pd.to_datetime(valid_tags_df['timestamp']).dt.tz_localize(
-            jerusalem_tz)  # Convert to Jerusalem time
+    modified_tags_df = pd.DataFrame()
+    mod_path_str = "data/embrace_plus/participants_extra_data/valid_tags/auto_modified_tags/" + user_id + "_valid_tags_modified.csv"
+    if os.path.exists(mod_path_str):
+        modified_tags_df = pd.read_csv(mod_path_str, sep=',')
 
-    return biomarker_dfs, valid_tags_df
+    raw_tags_df = pd.DataFrame()
+
+    if not modified_tags_df.empty:
+        # Use timestamp from modified tags as raw tags
+        if "timestamp" in modified_tags_df.columns:
+            # Create raw_tags_df from modified_tags_df['timestamp']
+            raw_tags_df = modified_tags_df.copy()
+            raw_tags_df["timestamp"] = raw_tags_df["timestamp"].astype(str).str.replace(" IDT", "").str.replace(" IST", "")
+            raw_tags_df["datetime"] = pd.to_datetime(raw_tags_df['timestamp']).dt.tz_localize(
+                 jerusalem_tz, ambiguous='NaT', nonexistent='NaT')
+        
+        # Prepare modified tags (new_timestamp)
+        if "new_timestamp" in modified_tags_df.columns:
+             modified_tags_df["timestamp"] = modified_tags_df["new_timestamp"]
+             modified_tags_df["timestamp"] = modified_tags_df["timestamp"].astype(str).str.replace(" IDT", "").str.replace(" IST", "")
+             modified_tags_df["datetime"] = pd.to_datetime(modified_tags_df['timestamp']).dt.tz_localize(
+                 jerusalem_tz, ambiguous='NaT', nonexistent='NaT')
+
+    else:
+        # Fallback to reading raw tags file if modified doesn't exist
+        raw_path_str = "data/embrace_plus/participants_extra_data/valid_tags/raw_tags/" + user_id + "_valid_tags_raw.csv"
+        if os.path.exists(raw_path_str):
+             raw_tags_df = pd.read_csv(raw_path_str, sep=',')
+             if not raw_tags_df.empty:
+                if "timestamp" in raw_tags_df.columns:
+                     raw_tags_df["timestamp"] = raw_tags_df["timestamp"].astype(str).str.replace(" IDT", "").str.replace(" IST", "")
+                     raw_tags_df["datetime"] = pd.to_datetime(raw_tags_df['timestamp']).dt.tz_localize(
+                    jerusalem_tz, ambiguous='NaT', nonexistent='NaT')
+
+    return biomarker_dfs, raw_tags_df, modified_tags_df
 
 
 def prepare_data(biomarker_names, data_root_dir, jerusalem_tz, override, trial_starting_date, user_id):
