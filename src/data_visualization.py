@@ -119,7 +119,7 @@ def visualize_events(biomarker_dfs, raw_tags_df, modified_tags_df, anomaly_event
                  
             event_plots.append(visualize_data(filtered_biomarker_dfs, raw_event_time, modified_event_time, anomaly_events=window_anomalies, split=False, normalize=normalize))
     
-    show(gridplot(event_plots, ncols=4, sizing_mode="stretch_width"))
+    show(gridplot(event_plots, ncols=1, sizing_mode="stretch_width"))
 
 
 from sklearn.ensemble import IsolationForest
@@ -221,41 +221,62 @@ def tune_isolation_forest(features_df):
     return features_df
 
 
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from bokeh.models import Range1d, LinearAxis
+
 def visualize_data(biomarker_dfs, raw_events, modified_events, anomaly_events=None, split=True, normalize=False):
-    fig_big = figure(sizing_mode="stretch_width", x_axis_type='datetime', background_fill_color="WhiteSmoke")
-    fig_big.xaxis.axis_label = 'Time'
-    fig_big.xaxis.formatter = DatetimeTickFormatter(days="%d/%m",
-                                                    hours="%H",
-                                                    minutes="%H:%M")
-    if split:
-        fig_small = figure(sizing_mode="stretch_width", x_axis_type='datetime', background_fill_color="WhiteSmoke")
-        fig_small.xaxis.axis_label = 'Time'
-        fig_small.xaxis.formatter = DatetimeTickFormatter(days="%d/%m",
-                                                          hours="%H",
-                                                          minutes="%H:%M")
+    # Single plot with multiple Y-axes
+    p = figure(sizing_mode="stretch_width", height=400, x_axis_type='datetime', background_fill_color="WhiteSmoke", title="Event Analysis")
+    p.xaxis.formatter = DatetimeTickFormatter(days="%d/%m", hours="%H", minutes="%H:%M")
+    
+    first_biomarker = True
+    
     for name, df in biomarker_dfs.items():
-        proper_size_fig = fig_big
+        if df.empty: continue
         
-        # Prepare data for plotting
-        plot_df = df.copy()
         y_col = biomarker_value_names[name]
         
-        if normalize and not plot_df.empty:
-            scaler = StandardScaler()
-            # Reshape for scalar
-            values = plot_df[y_col].values.reshape(-1, 1)
-            plot_df[y_col] = scaler.fit_transform(values)
+        # Calculate range for this biomarker
+        y_min = df[y_col].min()
+        y_max = df[y_col].max()
+        
+        # Add buffer
+        range_span = y_max - y_min
+        if range_span == 0: range_span = 1
+        y_start = y_min - 0.1 * range_span
+        y_end = y_max + 0.1 * range_span
+        
+        if first_biomarker:
+            # Main Axis
+            p.y_range = Range1d(start=y_start, end=y_end)
+            p.yaxis.axis_label = name.value
             
-        if split and not normalize and df[biomarker_value_names[name]].max() < 50:
-            proper_size_fig = fig_small
+            p.line(
+                x=df["datetime"].dt.tz_localize(None),
+                y=df[y_col],
+                legend_label=name.value,
+                color=biomarker_colors[name],
+                line_width=2
+            )
+            first_biomarker = False
+        else:
+            # Extra Axis
+            p.extra_y_ranges[name.value] = Range1d(start=y_start, end=y_end)
+            
+            # Add the new axis
+            ax = LinearAxis(y_range_name=name.value, axis_label=name.value)
+            p.add_layout(ax, 'right')
+            
+            p.line(
+                x=df["datetime"].dt.tz_localize(None),
+                y=df[y_col],
+                legend_label=name.value,
+                color=biomarker_colors[name],
+                y_range_name=name.value,
+                line_width=2
+            )
 
-        proper_size_fig.line(
-            x=plot_df["datetime"].dt.tz_localize(None),
-            y=plot_df[biomarker_value_names[name]],
-            legend_label=name.value,
-            color=biomarker_colors[name]
-        )
-    
+    # Prepare event data once
     localized_raw_events = []
     if isinstance(raw_events, DataFrame) and not raw_events.empty:
          localized_raw_events = raw_events["datetime"].dt.tz_localize(None)
@@ -268,67 +289,31 @@ def visualize_data(biomarker_dfs, raw_events, modified_events, anomaly_events=No
     elif isinstance(modified_events, pd.Timestamp):
          localized_mod_events = [modified_events.tz_localize(None)]
 
-    if len(localized_raw_events) > 0:
-        fig_big.vspan(
-            x=localized_raw_events,
-            line_color="red",
-            legend_label="raw events",
-        )
-    
-    if len(localized_mod_events) > 0:
-        fig_big.vspan(
-            x=localized_mod_events,
-            line_color="green",
-            legend_label="modified events",
-        )
-    
-    # Visualize Anomalies
+    localized_anomalies = []
     if anomaly_events is not None and not anomaly_events.empty:
         localized_anomalies = anomaly_events["datetime"].dt.tz_localize(None)
-        fig_big.vspan(
-            x=localized_anomalies,
-            line_color="orange",
-            line_width=2,
-            legend_label="anomalies",
-            alpha=0.5
-        )
 
-    tooltips = [
-        ('datetime', '@x{%Y-%m-%d %H:%M:%S}'),
-        ('value', '@y'),
-    ]
-    fig_big.add_tools(HoverTool(tooltips=tooltips,
-                                formatters={'@x': 'datetime'}))
-    fig_big
-    if split:
-        if len(localized_raw_events) > 0:
-            fig_small.vspan(
-                x=localized_raw_events,
-                line_color="red",
-                legend_label="raw event",
-            )
-        if len(localized_mod_events) > 0:
-            fig_small.vspan(
-                x=localized_mod_events,
-                line_color="green",
-                legend_label="modified event",
-            )
-        
-        if anomaly_events is not None and not anomaly_events.empty:
-             fig_small.vspan(
-                x=localized_anomalies,
-                line_color="orange",
-                line_width=2,
-                legend_label="anomalies",
-                alpha=0.5
-            )
-            
-        fig_small.add_tools(HoverTool(tooltips=tooltips,
-                                      formatters={'@x': 'datetime'}))
-        layout = column(fig_big, fig_small, spacing=10, sizing_mode="stretch_both")
-        show(layout)
+    # Add Vspans to the plot
+    if len(localized_raw_events) > 0:
+        p.vspan(x=localized_raw_events, line_color="red", legend_label="raw events",
+                alpha=1.0, line_width=2)
+    
+    if len(localized_mod_events) > 0:
+        p.vspan(x=localized_mod_events, line_color="green", legend_label="modified events",
+                alpha=1.0, line_width=2)
+    
+    if len(localized_anomalies) > 0:
+        p.vspan(x=localized_anomalies, line_color="orange", line_width=2, legend_label="anomalies",
+                alpha=0.5)
 
-    return column(fig_big, spacing=10, sizing_mode="stretch_both")
+    # Tools
+    tooltips = [('datetime', '@x{%Y-%m-%d %H:%M:%S}'), ('value', '@y')]
+    p.add_tools(HoverTool(tooltips=tooltips, formatters={'@x': 'datetime'}))
+    
+    p.legend.click_policy = "hide"
+    p.legend.location = "top_left"
+
+    return p
 
 
 def prepare_data_and_tags(biomarker_names, data_root_dir, jerusalem_tz, trial_starting_date,
