@@ -21,7 +21,7 @@ def get_start_date(user_id, participant_dates):
 
 
 def modify_tag_timestamps(user_id, raw_tags_path=None, output_path=None, 
-                          max_modified_time_hours=6, cluster_gap_minutes=30,
+                          min_allowed_time_hours=6, max_allowed_time_hours=0.5, cluster_gap_minutes=30,
                           participant_dates=None):
     
     jerusalem_tz = pytz.timezone('Asia/Jerusalem')
@@ -104,12 +104,11 @@ def modify_tag_timestamps(user_id, raw_tags_path=None, output_path=None,
             continue
             
         # Search window
-        min_allowed_time = tag_time - timedelta(hours=max_modified_time_hours)
+        min_allowed_time = tag_time - timedelta(hours=min_allowed_time_hours)
+        max_allowed_time = tag_time + timedelta(hours=max_allowed_time_hours)
         
-        # Anomalies in window [min_allowed_time, tag_time]
-        # strictly less than tag_time? "search back in time... closest timestamp"
-        # Assuming <= tag_time
-        candidates = anom_times[(anom_times >= min_allowed_time) & (anom_times <= tag_time)]
+        # Anomalies in window [min_allowed_time, max_allowed_time]
+        candidates = anom_times[(anom_times >= min_allowed_time) & (anom_times <= max_allowed_time)]
         
         if candidates.empty:
             timestamp_clean = df_tags.iloc[i]["timestamp"].replace(" IDT", "").replace(" IST", "")
@@ -118,32 +117,44 @@ def modify_tag_timestamps(user_id, raw_tags_path=None, output_path=None,
 
             continue
             
-        # Closest to tag_time (latest in candidates)
-        closest_anomaly = candidates.iloc[-1]
+        # Closest to tag_time
+        # Use abs diff
+        closest_anomaly = candidates.iloc[(candidates - tag_time).abs().argmin()]
         
-        # Walk back
-        # Find all anomalies in range [min_allowed_time, closest_anomaly]
+        # Walk back logic from closest_anomaly
         # Iterate backwards from closest_anomaly
-        # We need the index of closest_anomaly in the full anom_times list to check precursors efficiently
+        # We need the index of closest_anomaly in the full candidates logic?
+        # Actually the 'walk back' logic implies finding earlier connected anomalies.
+        # If closest_anomaly is AFTER tag_time, do we walk back?
+        # Yes, standard logic: find an anchor (closest), then walk back to find the start of the cluster.
         
-        # Optimizing: we have the subset `candidates`. 
-        # Iterate backwards through candidates
-        current_marker = candidates.iloc[-1]
+        current_marker = closest_anomaly
         
-        # We need to look at the FULL anomaly list to ensure we don't miss steps if candidates was a subset?
-        # Actually candidates includes everything >= min_allowed_time.
-        # If the chain extends BEFORE min_allowed_time, do we follow it?
-        # Prompt: "not early than max_modified_time". So we stop at min_allowed_time.
-        # So using `candidates` is sufficient.
+        # We need to search in the FULL anom_times or just candidates?
+        # Typically walk back goes as far as the cluster allows.
+        # Let's search in candidates + earlier ones?
+        # To be safe and consistent with previous logic, we walk back using ALL available anomalies (sorted)
+        # Find index of current_marker in anom_times
+        
+        # Since anom_times is sorted, we can search sorted
+        # Or just use the timestamp value and find preceeding ones.
+        
+        # Find position in full sorted list
+        # We can find the index efficiently
+        # Since timestamps are unique (hopefully) or we just take the first match
+        
+        # Optimization: Filter anom_times to look only backward from current_marker
+        # We only care about anomalies BEFORE current_marker
+        
+        possible_precursors = anom_times[anom_times <= current_marker]
+        # Reverse iterate
+        precursors_list = possible_precursors.tolist()
         
         modified_time = current_marker
         
-        # Reverse iterate
-        # candidates is sorted asc.
-        candidate_list = candidates.tolist()
-        # Start from end
-        for j in range(len(candidate_list) - 2, -1, -1):
-            prev_anom = candidate_list[j]
+        # Start from end-1 (before current_marker)
+        for j in range(len(precursors_list) - 2, -1, -1):
+            prev_anom = precursors_list[j]
             diff = modified_time - prev_anom
             if diff <= timedelta(minutes=cluster_gap_minutes):
                 modified_time = prev_anom
