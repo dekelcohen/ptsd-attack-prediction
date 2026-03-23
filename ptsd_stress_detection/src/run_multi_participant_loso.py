@@ -18,11 +18,11 @@ DATA_DIR = r"D:\workdir\ptsd-attack-prediction\data\embrace_plus\participant_dat
 TAGS_DIR = r"D:\workdir\ptsd_stress_detection\refined_tags"
 
 # List of participants with valid refined tags
-PARTICIPANTS = [
-    "TRAIL009",
-    "TRAIL10",
-    # Add more participants here as their tags become available
-]
+def discover_participants(tags_dir):
+    tag_files = glob.glob(os.path.join(tags_dir, "*_refined_tags_v2.csv"))
+    return [os.path.basename(f).split("_")[0] for f in tag_files]
+
+PARTICIPANTS = discover_participants(TAGS_DIR)
 
 # Model settings
 USE_FOCAL_LOSS = False  # Focal loss has numerical issues; use scale_pos_weight instead
@@ -113,14 +113,16 @@ def run_loso():
     y = combined['label']
     participant_ids = combined['participant_id']
     
-    # Run LOSO CV
-    mean_f1, mean_prec, mean_rec, results = pipeline.classifier.train_and_evaluate_loso(
-        X, y, participant_ids
-    )
-    
-    print("\n=== Per-Participant Results ===")
-    for pid, res in results.items():
-        print(f"  {pid}: F1={res['f1']:.4f}, P={res['prec']:.2f}, R={res['rec']:.2f} ({res['n_stress']} stress)")
+    # Run LOSO CV for all supported models
+    for model_type in ["xgboost", "randomforest", "extratrees", "lightgbm"]:
+        print(f"\n=== LOSO CV: Model {model_type} ===")
+        pipeline.classifier = StressClassifier(model_type=model_type)
+        mean_f1, mean_prec, mean_rec, results = pipeline.classifier.train_and_evaluate_loso(
+            X, y, participant_ids
+        )
+        print(f"Mean F1: {mean_f1:.4f}, Precision: {mean_prec:.4f}, Recall: {mean_rec:.4f}")
+        for pid, res in results.items():
+            print(f"  {pid}: F1={res['f1']:.4f}, P={res['prec']:.2f}, R={res['rec']:.2f} ({res['n_stress']} stress)")
 
 def run_with_tuning():
     """Run with hyperparameter tuning first."""

@@ -352,8 +352,8 @@ if __name__ == '__main__':
         # 'TRAIL013': 'TRAIL013-3YK3J1514F',
         # 'TRAIL014': 'TRAIL014-3YK3K153QJ',
         # 'TRAIL015': 'TRAIL015-3YKC51P1YL',
-        # 'TRAIL016': 'TRAIL016-3YK3J151CV',
-        'TRAIL017': 'TRAIL017-3YK3J1514F',
+        'TRAIL016': 'TRAIL016-3YK3J151CV',
+        # 'TRAIL017': 'TRAIL017-3YK3J1514F',
     }
 
     from utils import load_participant_dates
@@ -384,8 +384,8 @@ if __name__ == '__main__':
     window_pairs = [[15], [15]]
 
     time = '15min'
-    window_minutes = 60*3
-    step_minutes = 60*3
+    window_minutes = 60*24
+    step_minutes = 60*24
     normalize = False
     standard_scaling = False
     multiclassification = False
@@ -416,7 +416,7 @@ if __name__ == '__main__':
         data = pd.concat([positive_data, negative_data])
         data = data.sort_values(by='timestamp_israel')
 
-        data = undersample_negdata(data, patients_dict)
+        # data = undersample_negdata(data, patients_dict)
 
         data = create_chunked_data(data, patients_dict, window_minutes=window_minutes,
                                    step_minutes=step_minutes, enable_tod=True, classification_column='classification')

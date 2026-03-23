@@ -55,7 +55,6 @@ class StressClassifier:
                     reg_alpha=0.2,
                     reg_lambda=0.5,
                     objective='binary',
-                    is_unbalance=True,  # Built-in imbalance handling
                     verbose=-1
                 )
             except ImportError:

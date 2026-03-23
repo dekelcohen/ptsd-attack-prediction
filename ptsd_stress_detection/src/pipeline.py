@@ -433,7 +433,7 @@ class StressDetectionPipeline:
         
         rows_removed = len(df) - len(filtered_df)
         if rows_removed > 0:
-            print(f"  Filtered out {rows_removed} rows with invalid timestamps")
+            pass # print(f"  Filtered out {rows_removed} rows with invalid timestamps")
         
         return filtered_df
 
@@ -499,23 +499,42 @@ class StressDetectionPipeline:
 
     def align_labels(self, features_df, tags_df, buffer_before_min=10, buffer_after_min=20):
         if tags_df is None or tags_df.empty:
-            features_df['label'] = 0 
+            features_df['label'] = 0
+            features_df['label_weight'] = 1.0
             return features_df
 
         features_df['label'] = 0
-        # buffer_sec = buffer_min * 60  <-- Removed undefined/unused
-        
-        # Sort for speed (optional)
+        features_df['label_weight'] = 1.0
+
         tags_sorted = tags_df.sort_values('timestamp')
-        
+
         for _, tag in tags_sorted.iterrows():
             t = tag['timestamp']
             start_range = t - (buffer_before_min * 60)
             end_range = t + (buffer_after_min * 60)
-            
+
+            confidence = tag.get('confidence', 1.0)
+            if pd.isna(confidence):
+                confidence = 1.0
+            confidence = float(np.clip(confidence, 0.2, 1.0))
+
+            severity = tag.get('severity', -1)
+            if pd.isna(severity) or severity < 0:
+                severity_factor = 0.85
+            else:
+                severity_factor = float(np.clip(severity / 5.0, 0.4, 1.0))
+
+            validated = tag.get('validated', True)
+            if isinstance(validated, str):
+                validated = validated.strip().lower() in {'1', 'true', 'yes', 'y'}
+            validated_factor = 1.0 if bool(validated) else 0.85
+
+            pos_weight = float(np.clip(confidence * severity_factor * validated_factor * 1.8, 0.35, 1.5))
+
             mask = (features_df['end_time'] >= start_range) & (features_df['start_time'] <= end_range)
             features_df.loc[mask, 'label'] = 1
-            
+            features_df.loc[mask, 'label_weight'] = np.maximum(features_df.loc[mask, 'label_weight'], pos_weight)
+
         return features_df
 
     def run_full_pipeline(self, data_dir: str, tags_file: str):
@@ -599,3 +618,40 @@ class StressDetectionPipeline:
     def run_on_all_data(self, data_dir: str):
         files = self.find_avro_files(data_dir)
         return self.process_files(files)
+
+    @staticmethod
+    def normalize_features(df: pd.DataFrame, exclude_cols=None) -> pd.DataFrame:
+        """
+        Normalize features using Z-score (standardization) per column.
+        (x - mean) / std
+        
+        Args:
+            df: DataFrame containing features
+            exclude_cols: List of columns to exclude from normalization (e.g., timestamp, label)
+            
+        Returns:
+            DataFrame with normalized features
+        """
+        if df.empty: return df
+        df_norm = df.copy()
+        
+        if exclude_cols is None:
+            exclude_cols = ['timestamp', 'start_time', 'end_time', 'source_file', 'label', 
+                           'hour_of_day', 'day_of_week', 'is_weekend', 
+                           'hour_sin', 'hour_cos', 'day_sin', 'day_cos']
+            
+        # Select columns to normalize
+        cols_to_norm = [c for c in df.columns if c not in exclude_cols and pd.api.types.is_numeric_dtype(df[c])]
+        
+        for col in cols_to_norm:
+            mean = df[col].mean()
+            std = df[col].std()
+            
+            # Avoid division by zero (if std is 0, set to 0 or keep original mean-centered?)
+            # If std is 0, value is constant. Z-score would be 0 or NaN.
+            if std > 1e-9:
+                df_norm[col] = (df[col] - mean) / std
+            else:
+                df_norm[col] = 0.0 # Standard practice: if constant, it carries no info after centering
+                
+        return df_norm

@@ -24,7 +24,8 @@ class FeatureExtractor:
             return {
                 "hr_mean": np.nan, "hr_min": np.nan, "hr_max": np.nan,
                 "hr_std": np.nan, "hr_slope": np.nan, "hr_rmssd": np.nan,
-                "hr_sdnn": np.nan, "hr_pnn50": np.nan, "hr_range": np.nan
+                "hr_sdnn": np.nan, "hr_pnn50": np.nan, "hr_range": np.nan,
+                "hr_lf_hf_ratio": np.nan, "hr_spectral_entropy": np.nan
             }
 
         features = {
@@ -32,7 +33,9 @@ class FeatureExtractor:
             "hr_min": np.min(hr_monitor_data),
             "hr_max": np.max(hr_monitor_data),
             "hr_std": np.std(hr_monitor_data),
-            "hr_range": np.max(hr_monitor_data) - np.min(hr_monitor_data),  # NEW: HR Range
+            "hr_range": np.max(hr_monitor_data) - np.min(hr_monitor_data),
+            "hr_lf_hf_ratio": np.nan,
+            "hr_spectral_entropy": np.nan
         }
         
         # Calculate slope (linear regression over the window)
@@ -41,7 +44,6 @@ class FeatureExtractor:
             features["hr_slope"] = slope
             
             # HRV Features from IBI approximation
-            # Filter out zero/invalid HR values to prevent division by zero
             valid_hr = hr_monitor_data[hr_monitor_data > 0]
             if len(valid_hr) > 1:
                 ibi_series = 60.0 / valid_hr  # Convert HR to IBI (seconds)
@@ -57,6 +59,20 @@ class FeatureExtractor:
                 # pNN50: Proportion of successive differences > 50ms (NEW)
                 nn50 = np.sum(np.abs(ibi_diffs) > 50)
                 features["hr_pnn50"] = (nn50 / len(ibi_diffs)) * 100 if len(ibi_diffs) > 0 else 0
+                # Frequency-domain HRV features (LF/HF ratio, spectral entropy)
+                try:
+                    from scipy.signal import welch
+                    f, Pxx = welch(ibi_ms, fs=1, nperseg=min(256, len(ibi_ms)))
+                    lf_band = (f >= 0.04) & (f <= 0.15)
+                    hf_band = (f > 0.15) & (f <= 0.4)
+                    lf_power = np.sum(Pxx[lf_band])
+                    hf_power = np.sum(Pxx[hf_band])
+                    features["hr_lf_hf_ratio"] = lf_power / hf_power if hf_power > 0 else np.nan
+                    psd_norm = Pxx / np.sum(Pxx)
+                    features["hr_spectral_entropy"] = -np.sum(psd_norm * np.log(psd_norm + 1e-12))
+                except Exception:
+                    features["hr_lf_hf_ratio"] = np.nan
+                    features["hr_spectral_entropy"] = np.nan
             else:
                 features["hr_rmssd"] = np.nan
                 features["hr_sdnn"] = np.nan
@@ -104,42 +120,45 @@ class FeatureExtractor:
 
     def compute_temp_features(self, temp_data: np.array) -> dict:
         if len(temp_data) == 0: return {}
-        
-        # Skin Temperature features
         features = {
             "temp_mean": np.mean(temp_data),
             "temp_min": np.min(temp_data),
             "temp_max": np.max(temp_data),
             "temp_std": np.std(temp_data)
         }
-        
-        # Slope
         if len(temp_data) > 1:
             slope, _, _, _, _ = stats.linregress(np.arange(len(temp_data)), temp_data)
             features["temp_slope"] = slope
+            hours = np.arange(len(temp_data)) % 24
+            day_mask = (hours >= 8) & (hours <= 20)
+            night_mask = ~day_mask
+            day_mean = np.mean(temp_data[day_mask]) if np.any(day_mask) else np.nan
+            night_mean = np.mean(temp_data[night_mask]) if np.any(night_mask) else np.nan
+            features["temp_day_night_diff"] = day_mean - night_mean
         else:
             features["temp_slope"] = 0.0
-            
+            features["temp_day_night_diff"] = np.nan
         return features
 
     def compute_acc_features(self, acc_df: pd.DataFrame) -> dict:
         if acc_df.empty: return {}
-        
-        # Calculate Magnitude: sqrt(x^2 + y^2 + z^2)
-        # Note: Empatica raw acc is usually int (e.g. -60 to 60 or similar range per g)
-        # We process magnitude to be orientation invariant
-        
         x = acc_df['acc_x'].values
         y = acc_df['acc_y'].values
         z = acc_df['acc_z'].values
-        
         mag = np.sqrt(x**2 + y**2 + z**2)
-        
         features = {
-            "acc_mean": np.mean(mag), # General activity level
-            "acc_std": np.std(mag),   # Variation in movement
+            "acc_mean": np.mean(mag),
+            "acc_std": np.std(mag),
             "acc_max": np.max(mag)
         }
+        if len(mag) > 0:
+            rest_thresh = np.percentile(mag, 25)
+            active_thresh = np.percentile(mag, 75)
+            features["acc_rest_ratio"] = np.mean(mag < rest_thresh)
+            features["acc_active_ratio"] = np.mean(mag > active_thresh)
+        else:
+            features["acc_rest_ratio"] = np.nan
+            features["acc_active_ratio"] = np.nan
         return features
 
     def compute_cross_modal_features(self, eda_features: dict, hr_features: dict) -> dict:

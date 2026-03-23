@@ -2,13 +2,18 @@ from pipeline import StressDetectionPipeline
 import os
 import glob
 import pandas as pd
+from imblearn.over_sampling import SMOTE
 
 # Multi-participant Training Script
 DATA_DIR = r"D:\workdir\ptsd-attack-prediction\data\embrace_plus\participant_data"
 TAGS_DIR = r"D:\workdir\ptsd-attack-prediction\data\embrace_plus\participants_extra_data\valid_tags\auto_modified_tags"
 
 # Participants to combine for training
-PARTICIPANTS = ["TRAIL009", "TRAIL10"]
+def discover_participants(tags_dir):
+    tag_files = glob.glob(os.path.join(tags_dir, "*_valid_tags_modified.csv"))
+    return [os.path.basename(f).split("_")[0] for f in tag_files]
+
+PARTICIPANTS = discover_participants(TAGS_DIR)
 
 def run_multi_participant():
     print("=== Running Multi-Participant Training ===")
@@ -76,12 +81,22 @@ def run_multi_participant():
     if len(combined_data['label'].unique()) > 1:
         X = combined_data.drop(columns=['label', 'start_time', 'end_time', 'source_file', 'timestamp', 'participant'], errors='ignore')
         y = combined_data['label']
-        
         print(f"\nFeatures: {list(X.columns)}")
         print(f"Feature count: {len(X.columns)}")
-        
-        # Run threshold-optimized CV
-        pipeline.classifier.train_and_evaluate_cv_threshold(X, y)
+        # Report additional metrics for all models
+        for model_type in ["xgboost", "randomforest", "extratrees", "lightgbm"]:
+            print(f"\n=== Model: {model_type} ===")
+            pipeline.classifier = StressClassifier(model_type=model_type)
+            pipeline.classifier.train_and_evaluate_cv_threshold(X, y)
+            # Report ROC-AUC and confusion matrix
+            from sklearn.metrics import roc_auc_score, confusion_matrix
+            y_pred = pipeline.classifier.model.predict(X)
+            y_proba = pipeline.classifier.model.predict_proba(X)[:, 1] if hasattr(pipeline.classifier.model, 'predict_proba') else None
+            if y_proba is not None:
+                auc = roc_auc_score(y, y_proba)
+                print(f"ROC-AUC: {auc:.4f}")
+            cm = confusion_matrix(y, y_pred)
+            print(f"Confusion Matrix:\n{cm}")
     else:
         print("Dataset has only one class. Cannot train.")
 
